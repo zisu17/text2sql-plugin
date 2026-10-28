@@ -1,0 +1,29 @@
+[project]
+name = "t2s"
+version = "0.3.0"
+license = "MIT"
+description = "text2sql 플러그인의 명령줄 도구. 지표 정의로 SQL 을 만들고, 검사하고, 읽기 전용으로 실행한다. LLM 을 쓰지 않는다"
+requires-python = ">=3.10"
+# 파서 동작이 버전마다 달라 테스트한 버전으로 고정한다. 올릴 때는 전체 점검을 다시 돈다
+dependencies = ["sqlglot==30.25.0", "sqlalchemy>=2.0", "pyyaml"]
+
+[project.scripts]
+t2s = "t2s.cli:main"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["t2s"]
+
+[tool.uv]
+# uv run·uv pip install 이 코드가 바뀐 것을 알아채고 다시 빌드하게 한다
+cache-keys = [{ file = "pyproject.toml" }, { file = "t2s/*.py" }]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]  # tests.conftest 를 저장소 루트 기준으로 import 한다
+testpaths = ["tests"]
