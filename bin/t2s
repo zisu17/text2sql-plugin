@@ -1,0 +1,33 @@
+#!/bin/sh
+# 이 플러그인에 같이 든 t2s 를 실행한다.
+#
+# 처음 한 번은 uv 로 전용 파이썬 환경을 만들고 t2s 를 설치한다(인터넷 필요). 다음부터는 그 환경의 t2s 를 바로 실행해
+# uv 도 인터넷도 쓰지 않는다. 그래서 쓰기 금지 샌드박스(Codex -s read-only)에서도 돈다.
+# 환경은 코드 내용(pyproject.toml·t2s/*.py)마다 하나다. 같은 버전이면 Claude Code 와 Codex 가 같은 환경을 같이 쓰고,
+# 코드가 바뀌면 다음 실행 때 새로 만든다. 환경 폴더($T2S_HOME, 기본 ~/.local/share/text2sql-plugin)는 언제 지워도 된다.
+#
+# `t2s setup` 은 설치만 하고 끝난다. Codex 만 쓰는 곳에서는 처음 한 번 보통 터미널에서 이것을 실행해 둔다.
+# Claude Code 는 플러그인의 bin/ 을 PATH 에 넣으므로 `t2s` 로 부를 수 있다. 다른 곳에서는 이 파일 경로로 부른다.
+# 쓰기 금지 샌드박스에서 실패하지 않게 /dev/null 같은 파일로 출력을 돌리지 않는다.
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+KEY=$(cat "$ROOT/pyproject.toml" "$ROOT"/t2s/*.py | cksum | cut -d ' ' -f 1)
+BASE=${T2S_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/text2sql-plugin}
+ENV="$BASE/$KEY"
+
+if [ ! -x "$ENV/bin/t2s" ]; then
+  if ! UV=$(command -v uv); then
+    echo '{"error": {"kind": "no_uv", "message": "uv 가 없다. https://docs.astral.sh/uv/getting-started/installation/ 에서 설치한 뒤 다시 실행한다", "retryable": false}}'
+    exit 1
+  fi
+  rm -rf "$ENV"
+  if ! { "$UV" venv --quiet --python ">=3.10" "$ENV" && "$UV" pip install --quiet --python "$ENV/bin/python" "$ROOT"; } 1>&2; then
+    rm -rf "$ENV"
+    echo "{\"error\": {\"kind\": \"setup_failed\", \"message\": \"t2s 를 처음 설치하지 못했다. 인터넷이 되고 $BASE 에 쓸 수 있는 보통 터미널에서 '$0 setup' 을 한 번 실행한다\", \"retryable\": false}}"
+    exit 1
+  fi
+fi
+if [ "$1" = "setup" ]; then
+  echo "{\"ok\": true, \"env\": \"$ENV\"}"
+  exit 0
+fi
+exec "$ENV/bin/t2s" "$@"
