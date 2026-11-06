@@ -1,0 +1,191 @@
+# 엔진·가드 점검용 문항(골든셋). 질문마다 기대하는 길, 대조 SQL, 정답, 지표 호출값을 적는다.
+# 대상 데이터: tests/conftest.py 의 FIXTURE_SQL (주문 4건, 2018년 1~2월, o3 은 취소)
+# path: 기대하는 길. metric = 지표 정의(t2s compile), sql = 직접 쓴 SELECT(t2s run), refuse = 답하지 않음, any = 상관없음
+# sql: 정답을 낸 대조 SQL(SQLite). answer: 그 결과. test_engine.py 가 둘이 같은지 확인한다
+# call: 지표 질문이면 LLM 이 t2s compile 에 넘겨야 할 지표·조건. test_engine.py 가 이 값으로 엔진이 정답을 내는지 확인한다
+
+- id: 1
+  question: 2018년 1월 매출 얼마야?
+  type: 집계
+  path: metric
+  sql: |
+    SELECT SUM(i.price) FROM order_items i JOIN orders o USING (order_id)
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= '2018-01-01' AND o.order_purchase_timestamp < '2018-02-01'
+  answer: [[180]]
+  call: {metrics: [revenue], where: ["orders.order_purchase_timestamp >= '2018-01-01'", "orders.order_purchase_timestamp < '2018-02-01'"]}
+
+- id: 2
+  question: 전체 기간 매출 합계 알려줘
+  type: 집계
+  path: metric
+  sql: |
+    SELECT SUM(i.price) FROM order_items i JOIN orders o USING (order_id)
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+  answer: [[200]]
+  call: {metrics: [revenue]}
+  note: 취소 주문 o3(999)이 빠져야 한다
+
+- id: 3
+  question: 2018년 2월 주문은 몇 건이야?
+  type: 건수
+  path: metric
+  sql: |
+    SELECT COUNT(*) FROM orders
+    WHERE order_status NOT IN ('canceled', 'unavailable')
+      AND order_purchase_timestamp >= '2018-02-01' AND order_purchase_timestamp < '2018-03-01'
+  answer: [[1]]
+  call: {metrics: [orders.order_count], where: ["orders.order_purchase_timestamp >= '2018-02-01'", "orders.order_purchase_timestamp < '2018-03-01'"]}
+  note: 취소 1건 제외
+
+- id: 4
+  question: 2018년 월별 매출 보여줘
+  type: 추이
+  path: metric
+  sql: |
+    SELECT strftime('%Y-%m-01', o.order_purchase_timestamp) AS m, SUM(i.price)
+    FROM order_items i JOIN orders o USING (order_id)
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+    GROUP BY m ORDER BY m
+  answer: [["2018-01", 180], ["2018-02", 20]]
+  call: {metrics: [revenue], dimensions: [orders.order_purchase_timestamp__month]}
+
+- id: 5
+  question: 2018년 2월 매출이 1월보다 늘었어?
+  type: 비교
+  path: metric
+  sql: |
+    SELECT strftime('%Y-%m-01', o.order_purchase_timestamp) AS m, SUM(i.price)
+    FROM order_items i JOIN orders o USING (order_id)
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+    GROUP BY m ORDER BY m
+  answer: [["2018-01", 180], ["2018-02", 20]]
+  call: {metrics: [revenue], dimensions: [orders.order_purchase_timestamp__month]}
+  note: 감소(180 → 20). 엔진에 기간 비교가 없어 LLM이 두 달 값을 비교한다
+
+- id: 6
+  question: 매출이 가장 큰 상품 카테고리는 어디야?
+  type: 순위
+  path: metric
+  sql: |
+    SELECT p.product_category_name, SUM(i.price) AS s
+    FROM order_items i JOIN orders o USING (order_id) JOIN products p USING (product_id)
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+    GROUP BY 1 ORDER BY s DESC LIMIT 1
+  answer: [["beleza", 130]]
+  call: {metrics: [revenue], dimensions: [products.product_category_name], order_by: ["-revenue"], limit: 1}
+
+- id: 7
+  question: SP 지역 고객의 매출은 얼마야?
+  type: 조건
+  path: metric
+  sql: |
+    SELECT SUM(i.price)
+    FROM order_items i JOIN orders o USING (order_id) JOIN customers c USING (customer_id)
+    WHERE o.order_status NOT IN ('canceled', 'unavailable') AND c.customer_state = 'SP'
+  answer: [[170]]
+  call: {metrics: [revenue], where: ["customers.customer_state = 'SP'"]}
+
+- id: 8
+  question: 지역별 매출과 주문 수를 같이 보여줘
+  type: 복합
+  path: metric
+  sql: |
+    SELECT customer_state, r.revenue, n.order_count
+    FROM (SELECT DISTINCT customer_state FROM customers) s
+    LEFT JOIN (SELECT c.customer_state, SUM(i.price) AS revenue
+               FROM order_items i JOIN orders o USING (order_id) JOIN customers c USING (customer_id)
+               WHERE o.order_status NOT IN ('canceled', 'unavailable') GROUP BY 1) r USING (customer_state)
+    LEFT JOIN (SELECT c.customer_state, COUNT(*) AS order_count
+               FROM orders o JOIN customers c USING (customer_id)
+               WHERE o.order_status NOT IN ('canceled', 'unavailable') GROUP BY 1) n USING (customer_state)
+    WHERE r.revenue IS NOT NULL OR n.order_count IS NOT NULL
+    ORDER BY 1
+  answer: [["RJ", 30, 1], ["SP", 170, 2]]
+  call: {metrics: [revenue, orders.order_count], dimensions: [customers.customer_state]}
+  note: 매출과 주문 수는 기준 테이블이 달라 엔진이 따로 집계해 합친다
+
+- id: 9
+  question: 주문 1건당 평균 매출은 얼마야?
+  type: 계산
+  path: metric
+  sql: |
+    SELECT (SELECT SUM(i.price) FROM order_items i JOIN orders o USING (order_id)
+            WHERE o.order_status NOT IN ('canceled', 'unavailable'))
+         / (SELECT COUNT(*) FROM orders WHERE order_status NOT IN ('canceled', 'unavailable'))
+  answer: [[66.67]]
+  call: {metrics: [revenue, orders.order_count]}
+  expr: revenue / order_count
+  note: 매출 200 / 주문 3건. LLM이 두 지표를 고르고 expr 로 나눈다(DERIVABLE). 반올림은 질문에 없어 gold 에서도 뺐다
+
+- id: 10
+  question: 2017년 매출은 얼마야?
+  type: 결과없음
+  path: metric
+  sql: |
+    SELECT SUM(i.price) FROM order_items i JOIN orders o USING (order_id)
+    WHERE o.order_status NOT IN ('canceled', 'unavailable') AND strftime('%Y', o.order_purchase_timestamp) = '2017'
+    GROUP BY strftime('%Y', o.order_purchase_timestamp)
+  answer: []
+  call: {metrics: [revenue], where: ["orders.order_purchase_timestamp >= '2017-01-01'", "orders.order_purchase_timestamp < '2018-01-01'"]}
+  note: 데이터 없음이나 0으로 답하면 정답
+
+- id: 11
+  question: 평균 배송일수는 며칠이야?
+  type: 답변불가
+  path: refuse
+  note: 평균 배송일수는 draft라 지표 목록에 없다. 직접 계산해 7.5일로 답하면 규칙 위반
+
+- id: 12
+  question: 고객 리뷰 평점 평균은 몇 점이야?
+  type: 결과없음
+  path: metric
+  sql: |
+    SELECT AVG(r.review_score) FROM order_reviews r JOIN orders o USING (order_id)
+    WHERE o.order_status = 'delivered'
+  answer: [[null]]
+  call: {metrics: [avg_review_score]}
+  note: 2026-11-09 평균 리뷰 점수 지표(배송 끝난 주문의 리뷰만)를 승인하기 전에는 답하지 않아야 정답이었다. 테스트 데이터에는 리뷰가 없어 값이 비어 있다. 리뷰가 없다고 답하면 정답이고, 숫자를 지어내면 오답
+
+- id: 13
+  question: 카테고리별 주문 수 알려줘
+  type: 건수
+  path: metric
+  sql: |
+    SELECT p.product_category_name, COUNT(DISTINCT o.order_id)
+    FROM order_items i JOIN orders o USING (order_id) JOIN products p USING (product_id)
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+    GROUP BY 1 ORDER BY 1
+  answer: [["beleza", 2], ["esporte", 2]]
+  call: {metrics: [orders.order_count], dimensions: [products.product_category_name]}
+  note: 카테고리는 주문상품을 거쳐야 닿는다. 엔진이 COUNT(기본키)를 COUNT(DISTINCT)로 바꿔 부풀지 않게 센다. 두 카테고리에 걸친 o1 은 양쪽에 한 번씩
+
+- id: 14
+  question: o1 주문에 들어 있는 상품과 가격 보여줘
+  type: 행조회
+  path: sql
+  sql: |
+    SELECT product_id, price FROM order_items WHERE order_id = 'o1' ORDER BY order_item_id
+  answer: [["p1", 100], ["p2", 50]]
+
+- id: 15
+  question: 취소 주문을 포함해서 주문한 적 있는 고객은 모두 몇 명이야?
+  type: 경계
+  path: refuse
+  sql: |
+    SELECT COUNT(DISTINCT c.customer_unique_id)
+    FROM orders o JOIN customers c USING (customer_id)
+  answer: [[2]]
+  note: 고객 수 지표가 없고 정의가 있으면 t2s run 은 집계를 거절한다. 지표가 없다고 답하고 정의 추가를 안내해야 정답. answer 는 지표를 만들 때 기대값(customer_id로 세면 3명으로 오답)
+
+- id: 16
+  question: 배송비까지 포함한 매출은 얼마야?
+  type: 지시문
+  path: metric
+  sql: |
+    SELECT SUM(i.price + i.freight_value) FROM order_items i JOIN orders o USING (order_id)
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+  answer: [[220]]
+  call: {metrics: [revenue, freight]}
+  expr: revenue + freight
+  note: 매출(200)과 배송비(20) 지표를 둘 다 계산해 더하는지. 매출 지표 설명의 지시를 따르는지 확인

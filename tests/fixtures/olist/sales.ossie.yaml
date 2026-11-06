@@ -1,0 +1,394 @@
+# Olist(브라질 이커머스 공개 데이터) 주문·매출 지표 정의 샘플
+# 시험용 정의다. 테스트 정답이 이 파일에 맞춰져 있어서 따로 고치지 않는다. 새 정의를 쓸 때 형식 예시로 본다.
+# 형식: Apache Ossie 0.2.0.dev0, apache/ossie 커밋 e2f3698 (2026-11-01) 기준
+# 검증: uv run --script <ossie 클론>/validation/validate.py tests/fixtures/olist/sales.ossie.yaml
+#
+# 배치 규칙(우리 규칙, Ossie 스펙 아님): definitions/<DB>/<주제>.ossie.yaml
+#   폴더 = DB(접속) 하나. 파일 = 그 DB 안의 주제 영역 하나 = Ossie 시맨틱 모델 하나
+#   Ossie 는 파일끼리 참조가 안 되므로, 조인하거나 함께 계산하는 테이블은 같은 파일에 둔다
+#
+# 지표 SQL은 엔진(text2sql/engine.py)이 이 파일의 식과 연결로 만든다. LLM은 설명·동의어를 보고 지표를 고른다.
+# Ossie에 전용 칸이 없는 것은 이렇게 적는다.
+#   필터 조건: 지표 식 안에 FILTER (WHERE ...) 또는 CASE
+#   시간 기준: ai_context.instructions 에 문장으로
+#   승인 여부: custom_extensions(vendor_name: TEXT2SQL)의 status. approved 인 지표와 연결만 쓴다
+#   정의 번호: 모델의 custom_extensions(TEXT2SQL)의 revision. 정의를 고칠 때마다 1 올린다(define-metric 스킬이 한다)
+# 날짜 차이는 DATEDIFF('day', ...)처럼 단위에 따옴표를 붙인다. 스펙 예시는 따옴표가 없지만 검증기(e2f3698)가 단위를 필드로 오인한다.
+# source 의 테이블 이름은 실제로 적재한 DB에 맞춰 바꾼다. 이 샘플은 SQLite 테스트 데이터 기준이라 스키마 없이 적었다(PostgreSQL이면 olist.orders 처럼).
+
+version: 0.2.0.dev0
+name: olist_sales
+description: 브라질 이커머스 Olist 주문·매출
+ai_context:
+  instructions: >-
+    데이터는 2016-09-04 ~ 2018-10-17 주문만 있다. 금액 단위는 브라질 헤알(BRL)이다.
+custom_extensions:
+  - vendor_name: TEXT2SQL
+    data: '{"revision": 2, "decisions": [{"id": "category_quality_improvement", "decider": "카테고리 담당자", "decision": "품질 개선이 필요한 카테고리를 고른다", "action": "개선 요청·원인 분석", "grain": ["customers.customer_state", "products.product_category_name"], "baseline": "지금은 보지 않음"}]}'
+
+datasets:
+  - name: orders
+    source: orders
+    primary_key: [order_id]
+    description: 주문 1건이 1행
+    fields:
+      - name: order_id
+        expression: {sql: order_id}
+        datatype: String
+      - name: customer_id
+        expression: {sql: customer_id}
+        datatype: String
+        description: 주문마다 새로 발급되는 고객 ID. 같은 사람을 묶으려면 customers.customer_unique_id 를 쓴다
+      - name: order_status
+        expression: {sql: order_status}
+        datatype: String
+        description: 주문 상태
+        ai_context:
+          instructions: >-
+            값은 delivered(배송 완료), shipped(배송 중), invoiced(청구됨), processing(처리 중),
+            approved(결제 승인), created(생성됨), canceled(취소), unavailable(재고 없음)
+      - name: order_purchase_timestamp
+        expression: {sql: order_purchase_timestamp}
+        datatype: DateTime
+        description: 주문일시. 기간을 묻는 질문의 기본 기준 날짜
+        ai_context:
+          synonyms: [주문일, 구매일]
+      - name: order_delivered_customer_date
+        expression: {sql: order_delivered_customer_date}
+        datatype: DateTime
+        description: 고객 수령일시. 배송이 끝나지 않았으면 NULL
+        ai_context:
+          synonyms: [배송완료일, 수령일]
+      - name: order_approved_at
+        expression: {sql: order_approved_at}
+        datatype: DateTime
+        description: 결제 승인일시
+      - name: order_delivered_carrier_date
+        expression: {sql: order_delivered_carrier_date}
+        datatype: DateTime
+        description: 물류사 인계일시
+      - name: order_estimated_delivery_date
+        expression: {sql: order_estimated_delivery_date}
+        datatype: DateTime
+        description: 주문 때 고객에게 안내한 예상 배송일
+    metrics:
+      - name: order_count
+        expression:
+          sql: COUNT(order_id) FILTER (WHERE order_status NOT IN ('canceled', 'unavailable'))
+        description: 주문 수. 취소와 재고 없음 주문은 뺀다
+        datatype: Integer
+        ai_context:
+          synonyms: [주문 수, 주문 건수]
+          instructions: 기간은 order_purchase_timestamp(주문일) 기준으로 자른다. 일, 주, 월 단위로 볼 수 있다
+        custom_extensions:
+          - vendor_name: TEXT2SQL
+            data: '{"status": "approved"}'
+      - name: avg_delivery_days
+        expression:
+          sql: AVG(DATEDIFF('day', order_purchase_timestamp, order_delivered_customer_date)) FILTER (WHERE order_status = 'delivered')
+        description: 평균 배송일수. 주문일부터 고객 수령일까지 달력 기준 일수
+        datatype: Decimal
+        ai_context:
+          synonyms: [배송 기간, 배송 소요일]
+          instructions: 기간은 주문일 기준. 시작 시점을 주문일로 볼지 결제 승인일로 볼지 아직 정하지 않았다
+        custom_extensions:
+          - vendor_name: TEXT2SQL
+            data: '{"status": "draft"}'
+
+  - name: order_items
+    source: order_items
+    primary_key: [order_id, order_item_id]
+    description: 주문 안의 상품 1개가 1행. 주문 1건에 여러 행이 있을 수 있다
+    fields:
+      - name: order_id
+        expression: {sql: order_id}
+        datatype: String
+      - name: order_item_id
+        expression: {sql: order_item_id}
+        datatype: Integer
+        description: 주문 안에서의 상품 순번(1부터)
+      - name: product_id
+        expression: {sql: product_id}
+        datatype: String
+      - name: seller_id
+        expression: {sql: seller_id}
+        datatype: String
+      - name: shipping_limit_date
+        expression: {sql: shipping_limit_date}
+        datatype: DateTime
+        description: 판매자가 물류사에 넘겨야 하는 기한
+      - name: price
+        expression: {sql: price}
+        datatype: Decimal
+        description: 상품 가격. 배송비는 들어 있지 않다
+      - name: freight_value
+        expression: {sql: freight_value}
+        datatype: Decimal
+        description: 배송비
+
+  - name: customers
+    source: customers
+    primary_key: [customer_id]
+    fields:
+      - name: customer_id
+        expression: {sql: customer_id}
+        datatype: String
+      - name: customer_unique_id
+        expression: {sql: customer_unique_id}
+        datatype: String
+        description: 실제 고객(사람) 단위 ID. 고객 수와 재구매는 이 값으로 센다
+      - name: customer_state
+        expression: {sql: customer_state}
+        datatype: String
+        description: 고객이 사는 주. 두 글자 코드(SP, RJ 등)
+        ai_context:
+          synonyms: [지역, 주]
+      - name: customer_city
+        expression: {sql: customer_city}
+        datatype: String
+        description: 고객이 사는 도시
+      - name: customer_zip_code_prefix
+        expression: {sql: customer_zip_code_prefix}
+        datatype: Integer
+        description: 우편번호 앞 5자리. 공식 스키마에서 geolocation 과 잇는 값이지만 이 DB 에는 geolocation 이 없다
+
+  - name: products
+    source: products
+    primary_key: [product_id]
+    fields:
+      - name: product_id
+        expression: {sql: product_id}
+        datatype: String
+      - name: product_category_name
+        expression: {sql: product_category_name}
+        datatype: String
+        description: 상품 카테고리 이름(포르투갈어). 영어 이름은 product_category_name_translation 에 있다
+        ai_context:
+          synonyms: [카테고리, 상품 분류]
+      - name: product_name_lenght
+        expression: {sql: product_name_lenght}
+        datatype: Decimal
+        description: 상품명 글자 수. 이름의 lenght 는 원본 컬럼 철자 그대로다
+      - name: product_description_lenght
+        expression: {sql: product_description_lenght}
+        datatype: Decimal
+        description: 상품 설명 글자 수
+      - name: product_photos_qty
+        expression: {sql: product_photos_qty}
+        datatype: Decimal
+        description: 상품 사진 수
+      - name: product_weight_g
+        expression: {sql: product_weight_g}
+        datatype: Decimal
+        description: 상품 무게(g)
+      - name: product_length_cm
+        expression: {sql: product_length_cm}
+        datatype: Decimal
+        description: 상품 길이(cm)
+      - name: product_height_cm
+        expression: {sql: product_height_cm}
+        datatype: Decimal
+        description: 상품 높이(cm)
+      - name: product_width_cm
+        expression: {sql: product_width_cm}
+        datatype: Decimal
+        description: 상품 너비(cm)
+
+  - name: sellers
+    source: sellers
+    primary_key: [seller_id]
+    description: 판매자 1명이 1행
+    fields:
+      - name: seller_id
+        expression: {sql: seller_id}
+        datatype: String
+      - name: seller_zip_code_prefix
+        expression: {sql: seller_zip_code_prefix}
+        datatype: Integer
+        description: 판매자 우편번호 앞 5자리. 공식 스키마에서 geolocation 과 잇는 값이지만 이 DB 에는 geolocation 이 없다
+      - name: seller_city
+        expression: {sql: seller_city}
+        datatype: String
+        description: 판매자가 있는 도시
+      - name: seller_state
+        expression: {sql: seller_state}
+        datatype: String
+        description: 판매자가 있는 주. 두 글자 코드(SP, RJ 등)
+
+  - name: order_payments
+    source: order_payments
+    primary_key: [order_id, payment_sequential]
+    description: 주문의 결제 1건이 1행. 한 주문을 여러 수단으로 나눠 내면 여러 행이 있다
+    fields:
+      - name: order_id
+        expression: {sql: order_id}
+        datatype: String
+      - name: payment_sequential
+        expression: {sql: payment_sequential}
+        datatype: Integer
+        description: 주문 안에서의 결제 순번
+      - name: payment_type
+        expression: {sql: payment_type}
+        datatype: String
+        description: 결제 수단
+        ai_context:
+          instructions: 값은 credit_card(신용카드), boleto(브라질 현금 고지서 결제), voucher(바우처), debit_card(직불카드), not_defined(미정)
+      - name: payment_installments
+        expression: {sql: payment_installments}
+        datatype: Integer
+        description: 할부 개월 수
+      - name: payment_value
+        expression: {sql: payment_value}
+        datatype: Decimal
+        description: 결제 금액(배송비 포함)
+
+  - name: order_reviews
+    source: order_reviews
+    primary_key: [review_id, order_id]
+    description: 주문 리뷰 1건이 1행. review_id 하나가 여러 주문에 붙은 경우가 있어 키는 (review_id, order_id)다
+    fields:
+      - name: review_id
+        expression: {sql: review_id}
+        datatype: String
+      - name: order_id
+        expression: {sql: order_id}
+        datatype: String
+      - name: review_score
+        expression: {sql: review_score}
+        datatype: Integer
+        description: 만족도 점수 1~5
+        ai_context:
+          synonyms: [평점, 리뷰 점수]
+      - name: review_comment_title
+        expression: {sql: review_comment_title}
+        datatype: String
+        description: 리뷰 제목(포르투갈어 자유 입력)
+      - name: review_comment_message
+        expression: {sql: review_comment_message}
+        datatype: String
+        description: 리뷰 본문(포르투갈어 자유 입력)
+      - name: review_creation_date
+        expression: {sql: review_creation_date}
+        datatype: DateTime
+        description: 만족도 조사를 보낸 날
+      - name: review_answer_timestamp
+        expression: {sql: review_answer_timestamp}
+        datatype: DateTime
+        description: 고객이 조사에 답한 일시
+
+  - name: product_category_name_translation
+    source: product_category_name_translation
+    primary_key: [product_category_name]
+    description: 상품 카테고리 이름 포르투갈어 → 영어 대응표
+    fields:
+      - name: product_category_name
+        expression: {sql: product_category_name}
+        datatype: String
+      - name: product_category_name_english
+        expression: {sql: product_category_name_english}
+        datatype: String
+        description: 상품 카테고리 영어 이름
+
+relationships:
+  - name: order_items_to_orders
+    from: order_items
+    to: orders
+    from_columns: [order_id]
+    to_columns: [order_id]
+    custom_extensions:
+      - vendor_name: TEXT2SQL
+        data: '{"status": "approved"}'
+  - name: order_items_to_products
+    from: order_items
+    to: products
+    from_columns: [product_id]
+    to_columns: [product_id]
+    custom_extensions:
+      - vendor_name: TEXT2SQL
+        data: '{"status": "approved"}'
+  - name: orders_to_customers
+    from: orders
+    to: customers
+    from_columns: [customer_id]
+    to_columns: [customer_id]
+    custom_extensions:
+      - vendor_name: TEXT2SQL
+        data: '{"status": "approved"}'
+  # 아래 연결은 Kaggle 공식 스키마(ERD) 기준. order_reviews_to_orders 만 승인했고(2026-11-09, 평균 리뷰 점수 지표) 나머지는 승인 전이라 draft 다
+  - name: order_items_to_sellers
+    from: order_items
+    to: sellers
+    from_columns: [seller_id]
+    to_columns: [seller_id]
+    custom_extensions:
+      - vendor_name: TEXT2SQL
+        data: '{"status": "draft"}'
+  - name: order_payments_to_orders
+    from: order_payments
+    to: orders
+    from_columns: [order_id]
+    to_columns: [order_id]
+    custom_extensions:
+      - vendor_name: TEXT2SQL
+        data: '{"status": "draft"}'
+  - name: order_reviews_to_orders
+    from: order_reviews
+    to: orders
+    from_columns: [order_id]
+    to_columns: [order_id]
+    custom_extensions:
+      - vendor_name: TEXT2SQL
+        data: '{"status": "approved"}'
+  - name: products_to_category_translation
+    from: products
+    to: product_category_name_translation
+    from_columns: [product_category_name]
+    to_columns: [product_category_name]
+    ai_context:
+      instructions: 공식 ERD 그림에는 없고 번역 파일로만 있는 연결. 카테고리 2종(상품 13개)은 번역 표에 없다
+    custom_extensions:
+      - vendor_name: TEXT2SQL
+        data: '{"status": "draft"}'
+
+metrics:
+  - name: revenue
+    expression:
+      sql: SUM(CASE WHEN orders.order_status NOT IN ('canceled', 'unavailable') THEN order_items.price END)
+    description: 매출. 상품 가격 합계이고 배송비는 뺀다. 취소와 재고 없음 주문도 뺀다
+    datatype: Decimal
+    ai_context:
+      synonyms: [매출, 매출액, 판매액]
+      instructions: >-
+        기간은 orders.order_purchase_timestamp(주문일) 기준으로 자른다. 일, 주, 월 단위로 볼 수 있다.
+        배송비까지 포함한 금액을 물으면 freight 지표를 함께 계산해 더하고, 그렇게 더했다고 답에 밝힌다
+      examples: [지난달 매출, 카테고리별 매출 상위 10개, 주별 매출 추이]
+    custom_extensions:
+      - vendor_name: TEXT2SQL
+        data: '{"status": "approved"}'
+  - name: freight
+    expression:
+      sql: SUM(CASE WHEN orders.order_status NOT IN ('canceled', 'unavailable') THEN order_items.freight_value END)
+    description: 배송비 합계. 취소와 재고 없음 주문은 뺀다
+    datatype: Decimal
+    ai_context:
+      synonyms: [배송비, 운송비]
+      instructions: 기간은 orders.order_purchase_timestamp(주문일) 기준으로 자른다. 매출(revenue)에는 배송비가 들어 있지 않다
+    custom_extensions:
+      - vendor_name: TEXT2SQL
+        data: '{"status": "approved"}'
+  - name: avg_review_score
+    expression:
+      sql: AVG(CASE WHEN orders.order_status = 'delivered' THEN order_reviews.review_score END)
+    description: 평균 리뷰 점수. 배송이 끝난 주문에 달린 리뷰 점수(1~5)의 평균이고, 한 주문에 리뷰가 여러 개면 리뷰마다 한 번 센다
+    datatype: Decimal
+    ai_context:
+      synonyms: [평균 리뷰 점수, 평균 평점, 리뷰 점수 평균, 만족도 평균]
+      instructions: >-
+        카테고리 담당자가 품질 개선이 필요한 곳을 고르려고 고객 주(customers.customer_state)별로 본다.
+        기간은 orders.order_purchase_timestamp(주문일) 기준으로 자른다.
+        카테고리별은 아직 계산할 수 없다. 주문 하나에 여러 카테고리 상품이 들어 있어 리뷰를 카테고리에 나눌 규칙이 먼저 필요하다.
+        고객이 적은 주는 리뷰 몇 건에 평균이 크게 흔들린다(예: RR 고객 46명)
+      examples: [고객 주별 평균 리뷰 점수, 평균 리뷰 점수가 가장 낮은 주 5개]
+    custom_extensions:
+      - vendor_name: TEXT2SQL
+        data: '{"status": "approved", "decision": "category_quality_improvement", "discovery": [{"q": "한 건의 단위", "a": "리뷰. 한 주문에 리뷰가 여러 개면 리뷰마다 한 번 센다", "by": "지표 요청자", "at": "2026-11-09"}, {"q": "빼는 행", "a": "배송이 끝난(delivered) 주문의 리뷰만 넣는다", "by": "지표 요청자", "at": "2026-11-09"}, {"q": "기간 기준", "a": "주문일(orders.order_purchase_timestamp)", "by": "지표 요청자", "at": "2026-11-09"}, {"q": "보는 단위", "a": "고객 주별. 카테고리별은 리뷰를 카테고리에 나눌 규칙이 생긴 뒤", "by": "지표 요청자", "at": "2026-11-09"}]}'
