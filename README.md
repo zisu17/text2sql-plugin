@@ -29,7 +29,7 @@ codex plugin add text2sql@text2sql-plugin
 Codex는 첫 사용 전에 일반 터미널에서 `t2s`를 설치합니다. 플러그인을 업데이트한 뒤에도 다시 실행합니다.
 
 ```bash
-sh ~/.codex/plugins/cache/text2sql-plugin/text2sql/*/bin/t2s setup
+sh ~/.codex/plugins/cache/text2sql-plugin/text2sql/0.3.2/scripts/t2s setup
 ```
 
 ## 데이터베이스 연결
