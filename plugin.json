@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "text2sql",
+  "version": "0.3.0",
+  "description": "자연어 질문에 SQL로 답하는 Text-to-SQL 스킬과 읽기 전용 실행 도구",
+  "extensions": {
+    "com.openai": {
+      "requires_local_executor": true
+    }
+  }
+}
