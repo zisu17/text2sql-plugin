@@ -1,6 +1,6 @@
 [project]
 name = "t2s"
-version = "0.3.0"
+version = "0.3.1"
 license = "MIT"
 description = "text2sql 플러그인의 명령줄 도구. 지표 정의로 SQL 을 만들고, 검사하고, 읽기 전용으로 실행한다. LLM 을 쓰지 않는다"
 requires-python = ">=3.10"

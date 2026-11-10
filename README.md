@@ -46,7 +46,7 @@ export DATABASE_URL='sqlite:////absolute/path/data.sqlite'
 PostgreSQL을 쓴다면 `DATABASE_URL`을 `postgresql+psycopg://reader:비밀번호@host:5432/dbname` 형식으로 설정하고, 플러그인의 Python 환경에 드라이버를 한 번 설치합니다.
 
 ```bash
-sh /path/to/text2sql-plugin/bin/t2s setup
+sh /path/to/text2sql-plugin/scripts/t2s setup
 # 출력된 env 경로를 아래에 사용
 uv pip install --python '/path/from/setup/bin/python' 'psycopg[binary]'
 ```
@@ -64,6 +64,10 @@ SQL 설명·검사, 스키마 탐색, 지표 정의와 오류 진단도 각 스�
 - `no_uv` 또는 `setup_failed`: `uv`를 설치하고 위의 `t2s setup`을 일반 터미널에서 다시 실행합니다.
 - `no_database`: `DATABASE_URL`이 설정됐는지 확인합니다.
 - `db`: 접속 주소, DB 계정 권한, PostgreSQL 드라이버 또는 네트워크 접근을 확인합니다.
+
+## 업로드 파일 만들기
+
+저장소에서 `python3 scripts/build_plugin.py`를 실행하면 `dist/text2sql.plugin`이 만들어집니다. Claude에 업로드할 때 이 파일을 사용합니다.
 
 ## 라이선스
 

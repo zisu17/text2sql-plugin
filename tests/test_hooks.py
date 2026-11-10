@@ -27,11 +27,11 @@ def test_db_client():
 
 
 def test_check_definition_codex_patch(tmp_path):
-    # 플러그인 모양을 흉내 낸다: hooks/ 옆 bin/t2s 를 지금 파이썬의 t2s 로 둔다(전용 환경을 만들지 않게)
+    # 플러그인 모양을 흉내 낸다: hooks/ 옆 scripts/t2s 를 지금 파이썬의 t2s 로 둔다.
     (tmp_path / "hooks").mkdir()
     shutil.copy(HOOKS / "check_definition.py", tmp_path / "hooks")
-    (tmp_path / "bin").mkdir()
-    stub = tmp_path / "bin" / "t2s"
+    (tmp_path / "scripts").mkdir()
+    stub = tmp_path / "scripts" / "t2s"
     stub.write_text(f'#!/bin/sh\nPYTHONPATH="{ROOT}" exec "{sys.executable}" -m t2s.cli "$@"\n')
     stub.chmod(0o755)
     doc = yaml.safe_load(MODEL.read_text(encoding="utf-8"))

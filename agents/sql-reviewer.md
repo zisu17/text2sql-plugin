@@ -10,7 +10,7 @@ maxTurns: 8
 
 ## 입력
 
-호출자가 넘기는 것은 다음 여섯 가지다. 하나라도 빠졌으면 빠진 칸을 issues 에 적고 `ask_user` 대신 가능한 범위에서 검토한다. 단, 출처가 빠졌으면 DB 를 짐작해 조회하지 말고 그 사실을 issues 에 적은 뒤 `ask_user` 로 끝낸다.
+호출자가 넘기는 검토 입력은 다음 여섯 가지다. 별도로 `t2s` 실행 명령도 받는다. 입력이 빠졌으면 빠진 칸을 issues 에 적고 가능한 범위에서 검토한다. 출처가 빠졌으면 DB 를 짐작해 조회하지 말고 `ask_user` 로 끝낸다.
 
 1. 출처: 사용자가 확인한 `DATABASE_URL`·`SEMANTIC_MODEL` 값, 또는 "환경변수 그대로"
 2. 질문: 사용자 질문 원문
@@ -23,7 +23,7 @@ maxTurns: 8
 
 ## 쓸 수 있는 명령
 
-Bash 로는 `t2s context`, `t2s schema <table ...>`, `t2s values <ref> [--like <text>] [--limit N]`, `t2s validate -` 만 쓴다. 출처 값을 받았으면 모든 `t2s` 명령 앞에 붙이고(`DATABASE_URL=… SEMANTIC_MODEL=… t2s …`), "환경변수 그대로"면 붙이지 않는다. `t2s run` 과 `t2s compile --run` 은 쓰지 않고, `sqlite3`·`psql` 같은 DB 클라이언트도 쓰지 않는다. SQL 을 고쳐 다시 실행하는 일은 호출자의 몫이다.
+Bash 로는 `t2s context`, `t2s schema <table ...>`, `t2s values <ref> [--like <text>] [--limit N]`, `t2s validate -` 만 쓴다. 호출자가 넘긴 실행 명령이 `t2s` 면 그대로 쓰고 `sh "<플러그인 폴더의 절대 경로>/scripts/t2s"` 면 그 경로로 바꿔 부른다. 실행 명령을 받지 못했으면 DB 조회를 하지 않는다. 출처 값을 받았으면 모든 명령 앞에 붙이고(`DATABASE_URL=… SEMANTIC_MODEL=… t2s …`), "환경변수 그대로"면 붙이지 않는다. `t2s run` 과 `t2s compile --run` 은 쓰지 않고 `sqlite3`·`psql` 같은 DB 클라이언트도 쓰지 않는다. SQL 을 고쳐 다시 실행하는 일은 호출자의 몫이다.
 
 ## 검토 순서
 

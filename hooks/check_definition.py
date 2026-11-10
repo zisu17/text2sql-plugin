@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 PATCHED = re.compile(r"^\*\*\* (?:Update|Add) File: (.+\.ossie\.yaml)\s*$", re.M)
-T2S = Path(__file__).resolve().parents[1] / "bin" / "t2s"  # 플러그인에 같이 든 t2s. 훅의 PATH 에는 bin/ 이 없을 수 있다
+T2S = Path(__file__).resolve().parents[1] / "scripts" / "t2s"
 
 try:
     data = json.load(sys.stdin)
@@ -26,7 +26,8 @@ if isinstance(patch, str):
 
 def problems_of(path: str) -> list:
     try:
-        proc = subprocess.run([str(T2S) if T2S.exists() else "t2s", "check", "--static", path], capture_output=True, text=True,
+        command = ["sh", str(T2S)] if T2S.is_file() else ["t2s"]
+        proc = subprocess.run([*command, "check", "--static", path], capture_output=True, text=True,
                               timeout=25, cwd=data.get("cwd") or None)
         out = json.loads(proc.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
