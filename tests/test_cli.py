@@ -41,6 +41,75 @@ def test_draft_preview_and_local_definition_ignored(env, capsys):
     assert t2s(capsys, "context")["definition"]["version_id"] == "published-v1"
 
 
+def test_local_definition_preview(env, capsys, tmp_path):
+    """아직 게시되지 않은 지표로 탐색하고 계산하되 일반 조회는 활성 Graph 모델을 쓴다."""
+    published = yaml.safe_load(MODEL.read_text(encoding="utf-8"))
+    orders = next(d for d in published["datasets"] if d["name"] == "orders")
+    metric = {
+        "name": "late_delivery_rate",
+        "expression": {"sql": (
+            "AVG(CASE WHEN DATEDIFF(day, order_estimated_delivery_date, order_delivered_customer_date) > 0 "
+            "THEN 1.0 ELSE 0.0 END) FILTER (WHERE order_status = 'delivered')"
+        )},
+        "nonportable_extensions": [{"vendor_name": "TEXT2SQL", "data": {"status": "draft"}}],
+    }
+    local = {"name": "orders_preview", "datasets": [{**orders, "metrics": [metric]}]}
+    path = tmp_path / "working copy.ossie.yaml"
+    path.write_text(yaml.safe_dump(local), encoding="utf-8")
+    env.setenv("SEMANTIC_MODEL", str(path))
+    with sqlite3.connect(tmp_path / "demo.sqlite") as con:
+        con.executemany(
+            "UPDATE orders SET order_estimated_delivery_date = ? WHERE order_id = ?",
+            [("2018-01-10 08:00:00", "o1"), ("2018-01-29 10:00:00", "o2")],
+        )
+    con.close()
+
+    assert t2s(capsys, "context")["definition"]["version_id"] == "published-v1"
+    assert t2s(capsys, "compile", "late_delivery_rate", code=1)["error"]["code"] == "unknown_metric"
+
+    def no_graph(model=None):
+        raise AssertionError("로컬 정의 미리 계산에서 Graph를 호출했다")
+
+    env.setattr(cli, "fetch_model", no_graph)
+    option = ("--definition", str(path))
+    source = {"kind": "local", "path": str(path)}
+    context = t2s(capsys, "context", *option)
+    assert context["definition"] == {
+        "name": "orders_preview", "revision": 0, "source": "local", "version_id": None, "path": str(path),
+    }
+    assert context["tables"] == ["orders"]
+    schema = t2s(capsys, "schema", "orders", *option)
+    assert schema["source"] == source and "order_status" in schema["describe"]
+    values = t2s(capsys, "values", "orders.order_status", "--like", "delivered", *option)
+    assert values["source"] == source and values["values"] == [{"value": "delivered", "count": 2}]
+
+    command = ("compile", "late_delivery_rate", "--by", "orders.order_purchase_timestamp__month", "--run", *option)
+    assert t2s(capsys, *command, code=1)["error"]["code"] == "metric_not_approved"
+    out = t2s(capsys, *command, "--allow-draft")
+    assert out["source"] == source and out["preview"] is True
+    assert dict(out["result"]["rows"]) == {"2018-01-01": 0.5, "2018-02-01": None}
+
+    metric["nonportable_extensions"][0]["data"]["status"] = "approved"
+    path.write_text(yaml.safe_dump(local), encoding="utf-8")
+    out = t2s(capsys, *command)
+    assert out["preview"] is True and out["source"] == source
+
+
+def test_local_definition_path_errors(env, capsys, tmp_path):
+    path = tmp_path / "invalid.ossie.yaml"
+    for content in (None, "datasets: ["):
+        if content is not None:
+            path.write_text(content, encoding="utf-8")
+        out = t2s(capsys, "compile", "--definition", str(path), code=1)
+        assert out["error"]["kind"] == "bad_definition"
+
+
+@pytest.mark.parametrize("command", ["sql", "run", "validate"])
+def test_local_definition_is_limited_to_authoring_commands(env, capsys, command):
+    out = t2s(capsys, command, "SELECT 1", "--definition", str(MODEL), code=1)
+    assert out["error"]["kind"] == "bad_args"
+
+
 def test_setup_errors(env, capsys):
     """주소·드라이버·인자 오류도 traceback 없이 JSON 오류 하나다."""
     env.setenv("DATABASE_URL", "foo://x/y")

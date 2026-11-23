@@ -1,6 +1,6 @@
 # text2sql-plugin
 
-Claude Code와 Codex에서 자연어로 데이터베이스를 조회하는 플러그인입니다. 에이전트가 질문을 해석하고 내장된 `t2s`가 SQL을 만들거나 검사한 뒤 읽기 전용으로 실행합니다. 지표와 연결 규칙은 원격 Graph MCP의 활성 모델에서 읽습니다. 로컬 정의 파일은 조회에 사용하지 않습니다.
+Claude Code와 Codex에서 자연어로 데이터베이스를 조회하는 플러그인입니다. 에이전트가 질문을 해석하고 내장된 `t2s`가 SQL을 만들거나 검사한 뒤 읽기 전용으로 실행합니다. 일반 조회의 지표와 연결 규칙은 원격 Graph MCP의 활성 모델에서 읽습니다.
 
 ## 한눈에 보기
 
@@ -11,7 +11,7 @@ Claude Code와 Codex에서 자연어로 데이터베이스를 조회하는 플�
 | 명령줄에서 SQL을 만들거나 검사하기 | [`t2s` 명령](#t2s-명령) → [실행 보호와 점검](#실행-보호와-점검) |
 | 정의를 새로 작성·검사하기 | [시맨틱 정의 저장소](https://github.com/zisu17/semantic-definitions#readme)와 `define-metric`·`semantic-sync` 스킬 |
 
-일반 조회는 Graph MCP만 시맨틱 정의의 출처로 사용합니다. `define-metric`, `semantic-sync`, `t2s check`가 다루는 Ossie 파일은 **정의 작성·게시 전 검사**를 위한 소스입니다. 실제 지표 값은 Graph MCP가 아니라 원본 DB에서 읽습니다.
+일반 조회는 Graph MCP의 활성 모델을 사용합니다. `define-metric`은 로컬 Ossie 파일로 지표를 작성하고 게시 전에 미리 계산합니다. 실제 지표 값은 원본 DB에서 읽습니다.
 
 ## 준비와 설치
 
@@ -45,7 +45,7 @@ sh ~/.codex/plugins/cache/text2sql-plugin/text2sql/0.5.1/scripts/t2s setup
 export DATABASE_URL='sqlite:////absolute/path/data.sqlite'
 ```
 
-시맨틱 정의는 Graph MCP에서만 읽습니다. 실제 값 실행에만 `DATABASE_URL`이 필요합니다. `DB_SCHEMA`, `SQL_DIALECT`, `MAX_ROWS`(기본 100), `QUERY_TIMEOUT`(기본 30초)도 설정할 수 있습니다.
+일반 조회의 시맨틱 정의는 Graph MCP에서 읽습니다. 실제 값 실행에는 `DATABASE_URL`이 필요합니다. `DB_SCHEMA`, `SQL_DIALECT`, `MAX_ROWS`(기본 100), `QUERY_TIMEOUT`(기본 30초)도 설정할 수 있습니다.
 
 PostgreSQL은 `postgresql+psycopg://reader:비밀번호@host:5432/dbname` 형식의 주소를 사용합니다. `t2s setup`이 출력한 `env` 경로에 드라이버를 설치합니다.
 
@@ -78,7 +78,7 @@ Claude Code에서는 `/text2sql:ask 월별 매출 보여줘`, Codex에서는 `$a
 | `explain-sql` | SQL을 실행하지 않고 설명합니다 |
 | `validate-sql` | SQL을 실행하지 않고 검사합니다 |
 | `diagnose` | 오류나 잘못된 답의 원인을 분류합니다 |
-| `define-metric` | 새 지표를 draft로 정의하고 검사합니다 |
+| `define-metric` | 지표를 정의하고 미리 계산한 뒤 사용자가 승인한 항목을 로컬 정의에 기록합니다 |
 | `semantic-sync` | 정의 파일과 실제 DB를 대조하고 누락 범위를 보고합니다 |
 | `graph-metadata` | 게시된 정의의 계보·영향도·조인을 Graph MCP에서 찾습니다 |
 
@@ -103,7 +103,13 @@ sh scripts/t2s sql 'SELECT o.customer_id, AGG(o.order_count) AS n FROM orders AS
 
 `sql`은 조인으로 행이 늘어나도 지표의 기준 행을 한 번만 셉니다. 정의되지 않은 `SUM`·`COUNT` 같은 SQL 집계는 결과의 `undefined`와 `notes`에 표시합니다. `compile --query '{"dimensions": [...], "metrics": [...], "filter": "..."}'`로 Ossie 질의 JSON을 전달할 수 있습니다. `--strict`를 붙이면 3층 규격 밖 계산을 거절하고 Ossie 오류 코드를 반환합니다.
 
-활성 Graph 모델의 데이터셋 `source`에는 계산용 `SELECT`도 들어갈 수 있습니다. 정의 소스의 작성·검사는 `t2s check <파일>`에서 따로 수행하며 일반 질문의 조회 경로와 분리됩니다.
+지표 작성 중에는 `context`, `schema`, `values`, `compile`에 `--definition <파일>`을 붙여 로컬 정의를 사용합니다. `compile`의 로컬 결과에는 `preview: true`와 `source.kind: local`이 표시됩니다. 승인 전 지표를 미리 계산하려면 `--allow-draft`도 붙입니다.
+
+```bash
+sh scripts/t2s compile avg_delivery_days --allow-draft --run --definition ./sales.ossie.yaml
+```
+
+로컬 승인 상태는 정의 저장소에서 검토하고 Graph에 게시한 뒤 일반 조회에 반영됩니다.
 
 ## 실행 보호와 점검
 

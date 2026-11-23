@@ -6,6 +6,8 @@ from pathlib import Path
 from stat import S_IFLNK, S_IFMT
 from zipfile import ZipFile
 
+import yaml
+
 
 def test_upload_archive(tmp_path):
     root = Path(__file__).resolve().parents[1]
@@ -19,13 +21,19 @@ def test_upload_archive(tmp_path):
         assert {
             "scripts/t2s", "t2s/cli.py", "t2s/concepts.py", "t2s/measures.py",
             "skills/ask/SKILL.md", "skills/semantic-sync/SKILL.md",
-            "skills/graph-metadata/SKILL.md", ".mcp.json", "hooks/check_definition.py",
+            "skills/graph-metadata/SKILL.md", "skills/define-metric/SKILL.md",
+            "references/definition-format.md", ".mcp.json", "hooks/check_definition.py",
         } <= set(names)
         assert "plugin.json" not in names
         assert ".claude-plugin/marketplace.json" not in names
         assert not any(name.startswith("bin/") for name in names)
         assert not any(S_IFMT(info.external_attr >> 16) == S_IFLNK for info in zipped.infolist())
         assert zipped.testzip() is None
+
+        skill = zipped.read("skills/define-metric/SKILL.md").decode("utf-8")
+        frontmatter = yaml.safe_load(skill.split("---", 2)[1])
+        assert frontmatter["name"] == "define-metric"
+        assert "승인" in frontmatter["description"]
 
         claude_mcp = json.loads(zipped.read(".mcp.json"))
         claude_server = claude_mcp["mcpServers"]["text2sql-graph"]

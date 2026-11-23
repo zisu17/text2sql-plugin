@@ -96,7 +96,7 @@ def _load(path: str) -> SemanticModel:
         _fail({"error": {"kind": "bad_definition", "message": f"정의 파일을 읽을 수 없음: {path} ({type(e).__name__}: {str(e)[:200]})"}})
 
 
-def _model() -> SemanticModel | None:
+def _model() -> SemanticModel:
     try:
         snapshot = fetch_model(os.getenv("GRAPH_MODEL") or None)
         expected_version = os.getenv("GRAPH_VERSION_ID")
@@ -107,6 +107,10 @@ def _model() -> SemanticModel | None:
         return model
     except (GraphClientError, KeyError, ValueError) as error:
         _fail({"error": {"kind": "graph_unavailable", "message": str(error)}})
+
+
+def _local_source(definition: str | None) -> dict:
+    return {"source": {"kind": "local", "path": definition}} if definition is not None else {}
 
 
 def _sql_arg(sql: str) -> str:
@@ -219,24 +223,29 @@ def _compile(a: argparse.Namespace) -> None:
     if a.query is not None:
         call = {"query": a.query}
     # 행 수 기본값은 SQL 에 넣지 않는다. 실행할 때 가드가 DB 최대 행 수로 자르고 잘렸는지(truncated) 알려 준다
-    _log.update(call=call, expr=a.expr, executed=a.run, preview=a.allow_draft)
+    source = _local_source(a.definition)
+    preview = a.allow_draft or bool(source)
+    _log.update(call=call, expr=a.expr, executed=a.run, preview=preview)
     db = None
     if a.run:
         db = _database()
         a.dialect = db.dialect
-    model = _model()
+    model = _load(a.definition) if a.definition is not None else _model()
     times = {f"{d}.{n}".lower() for (d, n), f in model.fields.items() if is_time(f) and f.get("datatype") != "Date"}
     warnings = [w for cond in a.where for w in lint(cond, READ, time_columns=times)]
     if a.allow_draft:  # 승인 전에 결과를 보고 고치려는 미리 보기다. 질문 답변(ask)에서는 쓰지 않는다
         warnings.append({"kind": "preview", "message": "승인 전 지표·연결로 계산한 미리 보기다. 질문에 답할 때는 쓰지 않는다"})
+    elif source:
+        warnings.append({"kind": "preview", "message": "게시 전 로컬 정의를 사용한 미리 보기다"})
+    metadata = {**source, "warnings": warnings, **({"preview": True} if preview else {})}
     try:
-        out = {**engine.build(model, a), "warnings": warnings, **({"preview": True} if a.allow_draft else {})}
+        out = {**engine.build(model, a), **metadata}
     except EngineError as e:
-        _fail({"error": e.to_dict(), "warnings": warnings})
+        _fail({"error": e.to_dict(), "warnings": warnings, **source})
     _log["sql"] = out.get("sql")
     if db is None or "sql" not in out:
         return _emit(out)
-    safe, err = _check(db, out["sql"], None, engine_sql=True, model=model)  # 같은 Graph 버전으로 검증한다
+    safe, err = _check(db, out["sql"], None, engine_sql=True, model=model)
     if err:
         _fail({**out, "ok": False, "error": _guard_error(err)})
     result = _execute(db, safe, a.force)
@@ -245,7 +254,8 @@ def _compile(a: argparse.Namespace) -> None:
     _emit({**out, "result": result})
 
 
-def _values(db: Database, model: SemanticModel | None, ref: str, like: str | None, limit: int) -> None:
+def _values(db: Database, model: SemanticModel | None, ref: str, like: str | None, limit: int, *,
+            definition: str | None = None) -> None:
     """필드(정의가 없으면 컬럼)의 실제 값. SQL 은 sqlglot 노드로 만들어 --like 문자열이 SQL 로 읽히지 않게 하고 가드를 거친다."""
     def fail(kind: str, message: str) -> None:
         _fail({"error": {"kind": kind, "message": message, "retryable": kind in _RETRYABLE}})
@@ -281,14 +291,14 @@ def _values(db: Database, model: SemanticModel | None, ref: str, like: str | Non
         if like is not None:
             q = q.where(exp.Like(this=exp.Lower(this=e.copy()), expression=exp.Lower(this=exp.Literal.string(f"%{like}%"))))
     q = q.from_(source, dialect=BUILD)
-    safe, err = _check(db, q.sql(BUILD), BUILD, engine_sql=True, model=model)  # 같은 Graph 정의로 검증한다
+    safe, err = _check(db, q.sql(BUILD), BUILD, engine_sql=True, model=model)
     if err:
         _fail({"error": _guard_error(err)})
     try:
         result = db.execute(safe)
     except SQLAlchemyError as x:
         _fail({"error": _db_error(x)})
-    head = {"ref": ref, "table": table, "column": column}
+    head = {"ref": ref, "table": table, "column": column, **_local_source(definition)}
     if timed:
         lo, hi, nn, rows = result["rows"][0]
         return _emit({**head, "kind": "time", "min": lo, "max": hi, "non_null": nn, "rows": rows})
@@ -326,13 +336,15 @@ def _check_definition(path: str | None, static: bool) -> None:
            "problems": r["problems"], "notes": r["notes"], "pending": r.get("pending") or [], "samples": r["samples"] or [], "uncovered": gaps})
 
 
-def _context(db: Database, model: SemanticModel | None) -> dict:
+def _context(db: Database, model: SemanticModel, definition: str | None) -> dict:
     # ponytail: 정의 요약이 1만 토큰 이하면 통째로 넘긴다. 넘으면 질문으로 검색하는 구현으로 바꾼다
+    origin = {"source": "graph_mcp", "version_id": model.graph_version_id} if definition is None else {
+        "source": "local", "version_id": None, "path": definition,
+    }
     return {
         "dialect": db.dialect, "schema": db.schema, "max_rows": db.max_rows, "readonly_guarantee": db.readonly_guarantee,
-        "definition": {"name": model.name, "revision": model.revision,
-                       "version_id": model.graph_version_id, "source": "graph_mcp"} if model else None,
-        "catalog": model.catalog() if model else None,
+        "definition": {"name": model.name, "revision": model.revision, **origin},
+        "catalog": model.catalog(),
         "tables": sorted(policy(db, model)["allowed_tables"]),
     }
 
@@ -347,7 +359,7 @@ def _parser() -> argparse.ArgumentParser:
         v.add_argument("sql", help="SQL. - 면 stdin")
         v.add_argument("--read", help="SQL 을 쓴 문법. 없으면 대상 DB 문법")
     sub.choices["run"].add_argument("--force", action="store_true", help="실행 계획상 오래 걸릴 SQL 도 실행한다(시간 제한은 그대로)")
-    v = sub.add_parser("compile", help="Graph MCP의 활성 지표로 SQL 만들기")
+    v = sub.add_parser("compile", help="지표 정의로 SQL 만들기")
     v.add_argument("metrics", nargs="*", help="지표 이름. 비우면 지표 목록을 보여준다")
     v.add_argument("--by", action="append", default=[], help="묶음 기준 dataset.field. 날짜는 dataset.field__month")
     v.add_argument("--where", action="append", default=[], help="조건. dataset.field 로 쓴다")
@@ -369,6 +381,8 @@ def _parser() -> argparse.ArgumentParser:
     v.add_argument("ref", help="정의가 있으면 dataset.field, 없으면 table.column")
     v.add_argument("--like", help="대소문자 무시 부분 일치")
     v.add_argument("--limit", type=int, default=20, help="값 개수(최대 100)")
+    for name in ("context", "schema", "values", "compile"):
+        sub.choices[name].add_argument("--definition", metavar="PATH", help="게시 전 미리 보기에 사용할 로컬 정의 파일")
     c = sub.add_parser("check", help="정의 검사(문제가 있어도 exit 0)")
     c.add_argument("path", nargs="?", help="게시 전 검사할 정의 소스 파일")
     c.add_argument("--static", action="store_true", help="DB 없이 정의만 본다")
@@ -415,12 +429,15 @@ def _main(argv: list[str]) -> None:
         return _compile(a)
     if a.cmd == "check":
         return _check_definition(a.path, a.static)
-    db, model = _database(), _model()
+    definition = getattr(a, "definition", None)
+    db = _database()
+    model = _load(definition) if definition is not None else _model()
     if a.cmd == "context":
-        _emit(_context(db, model))
+        _emit(_context(db, model, definition))
     elif a.cmd == "schema":
         only = table_names(policy(db, model)["allowed_tables"])
-        _emit({"describe": db.describe(a.tables, only=only)} if a.tables else {"tables": db.table_list(only=only)})
+        out = {"describe": db.describe(a.tables, only=only)} if a.tables else {"tables": db.table_list(only=only)}
+        _emit({**out, **_local_source(definition)})
     elif a.cmd == "validate":
         sql = _sql_arg(a.sql)
         safe, err = _check(db, sql, a.read, model=model)
@@ -438,7 +455,7 @@ def _main(argv: list[str]) -> None:
         result = _execute(db, safe, a.force)
         (_emit if result["ok"] else _fail)({**result, "warnings": warnings})
     elif a.cmd == "values":
-        _values(db, model, a.ref, a.like, max(1, min(a.limit, 100)))
+        _values(db, model, a.ref, a.like, max(1, min(a.limit, 100)), definition=definition)
     elif a.cmd == "sql":
         _sql(db, model, a)
 
