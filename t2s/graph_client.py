@@ -1,13 +1,15 @@
-"""Load the active semantic definition from Graph MCP without a local file."""
+"""Load the active semantic definition from the Graph server without a local file.
+
+The server exposes the full model at GET /snapshot, outside MCP, so that no LLM can pull it into
+its context. Only this process reads it, to compile and validate SQL in memory.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import os
+from urllib.parse import quote
 
 import httpx2
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
 
 
 DEFAULT_URL = "https://text2sql-graph-mcp-production.up.railway.app/mcp"
@@ -17,29 +19,53 @@ class GraphClientError(RuntimeError):
     pass
 
 
-async def _fetch(model: str | None) -> dict:
+def _snapshot_url(model: str | None) -> str:
+    """TEXT2SQL_MCP_URL 은 MCP 주소(.../mcp)다. 같은 서버의 /snapshot[/모델] 로 바꾼다."""
+    base = os.getenv("TEXT2SQL_MCP_URL", DEFAULT_URL).rstrip("/").removesuffix("/mcp")
+    return f"{base}/snapshot" + (f"/{quote(model, safe='')}" if model else "")
+
+
+def _server_code(response: httpx2.Response) -> str:
+    try:
+        code = response.json()["error"]["code"]
+    except (ValueError, KeyError, TypeError):
+        return ""
+    return f" {code}" if isinstance(code, str) and code.isidentifier() else ""
+
+
+def fetch_model(model: str | None = None, *, transport: httpx2.BaseTransport | None = None) -> dict:
+    """{"version_id", "definition", ...}. 실패는 원인별 안내를 담은 GraphClientError. 토큰 값은 메시지에 넣지 않는다."""
     token = os.getenv("TEXT2SQL_MCP_TOKEN")
     if not token:
         raise GraphClientError("TEXT2SQL_MCP_TOKEN 이 없다. Graph MCP 인증을 설정한다")
-    url = os.getenv("TEXT2SQL_MCP_URL", DEFAULT_URL)
-    async with httpx2.AsyncClient(headers={"Authorization": f"Bearer {token}"},
-                                   timeout=httpx2.Timeout(30.0, read=300.0)) as http:
-        async with streamable_http_client(url, http_client=http) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool("graph_get_model_snapshot", {"model": model})
-    if result.is_error or not result.structured_content:
-        raise GraphClientError("Graph MCP에서 활성 모델을 읽지 못했다")
-    snapshot = result.structured_content
-    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("definition"), dict):
-        raise GraphClientError("Graph MCP 응답에 실행용 정의가 없다")
-    return snapshot
-
-
-def fetch_model(model: str | None = None) -> dict:
     try:
-        return asyncio.run(_fetch(model))
-    except GraphClientError:
-        raise
-    except Exception as error:
-        raise GraphClientError(f"Graph MCP 연결 실패: {type(error).__name__}") from error
+        with httpx2.Client(headers={"Authorization": f"Bearer {token}"}, timeout=httpx2.Timeout(30.0),
+                           transport=transport) as http:
+            response = http.get(_snapshot_url(model))
+    except httpx2.TimeoutException as error:
+        raise GraphClientError("Graph 서버가 30초 안에 응답하지 않았다. 잠시 뒤 다시 시도한다") from error
+    except httpx2.TransportError as error:
+        raise GraphClientError(f"Graph 서버에 연결하지 못했다({type(error).__name__}). TEXT2SQL_MCP_URL 주소와 네트워크를 확인한다") from error
+    except Exception as error:  # 잘못된 주소·헤더 값 등. 원문에 토큰이 섞일 수 있어 종류만 적는다
+        raise GraphClientError(f"Graph 서버 호출 실패: {type(error).__name__}") from error
+    status = response.status_code
+    if status in (401, 403):
+        raise GraphClientError(f"Graph 서버가 인증을 거절했다({status}). TEXT2SQL_MCP_TOKEN 값을 확인한다")
+    if status == 404:
+        raise GraphClientError("활성 모델을 찾지 못했다(404). GRAPH_MODEL 이름을 확인한다. "
+                               "Graph 서버가 0.3.0 보다 낮으면 /snapshot 경로가 없어 서버를 먼저 올려야 한다")
+    if status >= 500:
+        raise GraphClientError(f"Graph 서버 쪽 오류다({status}{_server_code(response)}). 서버 상태와 Neo4j 연결을 확인한다")
+    if status != 200:
+        raise GraphClientError(f"Graph 서버가 예상하지 못한 응답을 했다({status}). TEXT2SQL_MCP_URL 주소를 확인한다")
+    try:
+        snapshot = response.json()
+    except ValueError as error:
+        raise GraphClientError("Graph 서버 응답이 JSON 이 아니다. TEXT2SQL_MCP_URL 주소를 확인한다") from error
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("definition"), dict):
+        raise GraphClientError("Graph 서버 응답에 실행용 정의가 없다")
+    if not snapshot.get("model") or not snapshot.get("version_id"):
+        raise GraphClientError("Graph 서버 응답에 모델 또는 활성 버전이 없다")
+    if model and snapshot["model"] != model:
+        raise GraphClientError("Graph 서버 응답 모델이 요청과 다르다")
+    return snapshot

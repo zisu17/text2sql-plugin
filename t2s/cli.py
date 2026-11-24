@@ -3,7 +3,7 @@
 DB 는 DATABASE_URL·DB_SCHEMA·SQL_DIALECT·MAX_ROWS·QUERY_TIMEOUT, 실행용 정의는 Graph MCP에서 받는다.
 모든 출력은 stdout 에 JSON 하나다. T2S_LOG 에 파일 경로가 있으면 호출마다 사용 기록 JSON 한 줄을 덧붙인다.
 
-t2s context
+t2s context --datasets orders,order_items
 t2s validate "SELECT order_id FROM orders" --read duckdb
 t2s compile revenue --by products.product_category_name --run
 t2s values customers.customer_city --like paulo
@@ -336,23 +336,40 @@ def _check_definition(path: str | None, static: bool) -> None:
            "problems": r["problems"], "notes": r["notes"], "pending": r.get("pending") or [], "samples": r["samples"] or [], "uncovered": gaps})
 
 
-def _context(db: Database, model: SemanticModel, definition: str | None) -> dict:
-    # ponytail: 정의 요약이 1만 토큰 이하면 통째로 넘긴다. 넘으면 질문으로 검색하는 구현으로 바꾼다
+def _context(db: Database, model: SemanticModel | None, definition: str | None,
+             datasets: str | None = None) -> dict:
+    """문법·스키마·정의 번호·정의에 든 테이블. 정의 요약(catalog)은 --datasets 로 고른 데이터셋 범위만 낸다.
+
+    정의 전체 요약은 내지 않는다(Olist 기준 약 1만 6천 자). LLM 은 Graph MCP 로 범위를 좁힌 뒤 필요한 데이터셋만 받는다.
+    """
+    out = {
+        "dialect": db.dialect, "schema": db.schema, "max_rows": db.max_rows, "readonly_guarantee": db.readonly_guarantee,
+    }
+    if model is None:
+        return out
     origin = {"source": "graph_mcp", "version_id": model.graph_version_id} if definition is None else {
         "source": "local", "version_id": None, "path": definition,
     }
-    return {
-        "dialect": db.dialect, "schema": db.schema, "max_rows": db.max_rows, "readonly_guarantee": db.readonly_guarantee,
-        "definition": {"name": model.name, "revision": model.revision, **origin},
-        "catalog": model.catalog(),
-        "tables": sorted(policy(db, model)["allowed_tables"]),
-    }
+    out["definition"] = {"name": model.name, "revision": model.revision, **origin}
+    if datasets is not None:
+        only = {d.strip() for d in datasets.split(",") if d.strip()}
+        unknown = sorted(only - set(model.datasets))
+        if unknown or not only:
+            _fail({"error": {"kind": "unknown_table", "retryable": True,
+                             "message": f"없는 데이터셋: {', '.join(unknown) or '(비어 있음)'} (데이터셋: {', '.join(model.datasets)})"}})
+        out["catalog"] = model.catalog(only)
+    return {**out, "tables": sorted(model.tables())}  # 정의의 테이블. 정의 밖 테이블은 t2s schema 가 보여 준다
 
 
 def _parser() -> argparse.ArgumentParser:
     p = _Parser(prog="t2s", description="Text2SQL 공통 명령. 결과는 stdout 에 JSON 하나")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("context", help="문법·스키마·정의 요약·조회 가능한 테이블").add_argument("question", nargs="?", help="질문(지금은 쓰지 않는다)")
+    v = sub.add_parser("context", help="문법·스키마·정의 번호·정의에 든 테이블(정의 밖 테이블은 schema). 정의 요약은 --datasets 로 고른 범위만")
+    v.add_argument("question", nargs="?", help="쓰지 않는다. 예전 호출과 맞추려고 받기만 하고 무시한다")
+    v.add_argument("--datasets", metavar="a,b", help="이 데이터셋 범위의 정의 요약(catalog)을 같이 낸다: 그 데이터셋을 읽는 지표, 필드, 양 끝이 범위 안인 연결")
+    source = v.add_mutually_exclusive_group()
+    source.add_argument("--local", action="store_true", help="Graph 호출 없이 DB 설정만 표시")
+    source.add_argument("--definition", metavar="PATH", help="게시 전 미리 보기에 사용할 로컬 정의 파일")
     sub.add_parser("schema", help="테이블 목록, 테이블을 주면 컬럼 설명").add_argument("tables", nargs="*")
     for name, text in (("validate", "SQL 검증 결과와 구조(실패해도 exit 0)"), ("run", "검증 후 실행")):
         v = sub.add_parser(name, help=text)
@@ -381,7 +398,7 @@ def _parser() -> argparse.ArgumentParser:
     v.add_argument("ref", help="정의가 있으면 dataset.field, 없으면 table.column")
     v.add_argument("--like", help="대소문자 무시 부분 일치")
     v.add_argument("--limit", type=int, default=20, help="값 개수(최대 100)")
-    for name in ("context", "schema", "values", "compile"):
+    for name in ("schema", "values", "compile"):
         sub.choices[name].add_argument("--definition", metavar="PATH", help="게시 전 미리 보기에 사용할 로컬 정의 파일")
     c = sub.add_parser("check", help="정의 검사(문제가 있어도 exit 0)")
     c.add_argument("path", nargs="?", help="게시 전 검사할 정의 소스 파일")
@@ -424,16 +441,21 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def _main(argv: list[str]) -> None:
-    a = _parser().parse_args(argv)
+    parser = _parser()
+    a = parser.parse_args(argv)
     if a.cmd == "compile":
         return _compile(a)
     if a.cmd == "check":
         return _check_definition(a.path, a.static)
+    if a.cmd == "context" and a.local:
+        if a.datasets is not None:
+            parser.error("--local과 --datasets는 함께 사용할 수 없다")
+        return _emit(_context(_database(), None, None))
     definition = getattr(a, "definition", None)
     db = _database()
     model = _load(definition) if definition is not None else _model()
     if a.cmd == "context":
-        _emit(_context(db, model, definition))
+        _emit(_context(db, model, definition, a.datasets))
     elif a.cmd == "schema":
         only = table_names(policy(db, model)["allowed_tables"])
         out = {"describe": db.describe(a.tables, only=only)} if a.tables else {"tables": db.table_list(only=only)}
