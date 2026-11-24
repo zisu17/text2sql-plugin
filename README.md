@@ -58,7 +58,7 @@ uv pip install --python '/path/from/setup/bin/python' 'psycopg[binary]'
 
 ## Graph MCP 연결
 
-플러그인의 `mcp.json`은 [text2sql-graph-mcp](https://text2sql-graph-mcp-production.up.railway.app/mcp) 원격 서버의 연결 정보입니다. 서버 자체는 Railway에서 실행됩니다. 이 서버는 Neo4j에 게시된 활성 시맨틱 모델을 읽습니다. `t2s`는 같은 서버의 `GET /snapshot`에서 실행용 모델을 받아 메모리에서 컴파일합니다. 이 경로는 MCP 도구가 아니어서 LLM은 모델 전체를 불러올 수 없습니다. 원본 DB의 행은 MCP가 조회하지 않으므로 실제 값 실행에는 별도 `DATABASE_URL`이 필요합니다.
+플러그인의 `mcp.json`은 [text2sql-graph-mcp](https://text2sql-graph-mcp-production.up.railway.app/mcp) 원격 서버의 연결 정보입니다. 서버 자체는 Railway에서 실행됩니다. 이 서버는 Neo4j에 게시된 활성 시맨틱 모델을 읽습니다. `t2s`는 같은 서버의 `GET /snapshot`에서 실행용 모델을 받아 메모리에서 컴파일합니다. 받은 모델은 버전 번호별로 `~/.cache/t2s/snapshots/`(`XDG_CACHE_HOME`이 있으면 그 아래)에 남깁니다. `GRAPH_VERSION_ID`가 이미 받은 버전이면 서버를 부르지 않고 그 사본을 씁니다. 버전 번호는 정의 파일 내용으로 만들기 때문에 번호가 같으면 내용도 같습니다. 이 경로는 MCP 도구가 아니어서 LLM은 모델 전체를 불러올 수 없습니다. 원본 DB의 행은 MCP가 조회하지 않으므로 실제 값 실행에는 별도 `DATABASE_URL`이 필요합니다.
 
 서버는 Railway 서비스의 `MCP_API_TOKEN`을 Bearer 토큰으로 요구합니다. 비밀번호나 토큰을 이 저장소와 대화에 넣지 마세요.
 

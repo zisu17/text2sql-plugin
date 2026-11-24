@@ -36,13 +36,36 @@ def rewrite(sql: str, model: SemanticModel, read: str = "duckdb", dialect: str =
     if len(trees) != 1 or not isinstance(trees[0], exp.Query):
         raise EngineError("invalid_sql", "SELECT 문 하나만 받는다")
     tree = trees[0]
+    simplified = _unwrap(tree, read)
     undefined = [n.sql(read) for n in tree.find_all(exp.AggFunc) if not isinstance(n, exp.Agg)]
     _relations(tree, model, physical or set())
     r = _Rewriter(model, tree, allow_draft)
     for scope in build_scope(tree).traverse():  # 안쪽 블록부터
         r.block(scope)
     r.attach()
-    return {"sql": tree.sql(dialect, pretty=True), "measures": list(dict.fromkeys(r.used)), "undefined": undefined}
+    return {"sql": tree.sql(dialect, pretty=True), "measures": list(dict.fromkeys(r.used)), "undefined": undefined,
+            "simplified": simplified}
+
+
+def _unwrap(tree: exp.Expression, read: str) -> list[str]:
+    """같은 SELECT 에서 집계 함수로 감싼 AGG. AGG(x) 는 묶음마다 값이 하나라 AVG·MIN·MAX(AGG(x)) 는 AGG(x) 와 같다.
+    그 셋은 AGG(x) 로 바꾸고 바꾼 식을 돌려준다. 행 수에 따라 값이 달라지는 SUM·COUNT 등은 뜻을 정할 수 없어 오류다.
+    창 함수(SUM(AGG(x)) OVER ())는 묶음끼리 계산하는 올바른 SQL 이라 그대로 둔다."""
+    done = []
+    for agg in list(tree.find_all(exp.Agg)):
+        outer = agg.parent
+        while outer is not None and not isinstance(outer, (exp.AggFunc, exp.Select)):
+            outer = outer.parent
+        if not isinstance(outer, exp.AggFunc) or isinstance(outer.parent, exp.Window):
+            continue
+        if isinstance(outer, (exp.Avg, exp.Min, exp.Max)) and outer.this is agg and not isinstance(outer.parent, exp.Filter):
+            done.append(outer.sql(read))
+            outer.replace(agg)
+            continue
+        raise EngineError("invalid_agg", f"집계 함수 안에 AGG 를 쓸 수 없음: {outer.sql(read)}",
+                          hint="AGG(x) 는 이미 묶음마다 집계한 값이라 AGG(x) 로 그대로 쓴다. 묶음끼리 다시 집계하려면 "
+                               "하위 쿼리에서 묶음별 AGG 값을 낸 뒤 바깥 질의에서 집계한다")
+    return done
 
 
 def _relations(tree: exp.Expression, model: SemanticModel, physical: set[str]) -> None:

@@ -30,11 +30,27 @@ def test_agg_counts_each_row_once(con, model):
     ("SELECT AGG(o.order_count + o.order_count) FROM orders AS o", "invalid_agg"),
     ("SELECT AGG(order_count) FROM orders AS a JOIN orders AS b ON a.order_id = b.order_id", "unknown_measure"),  # 어느 쪽인지 모름
     ("SELECT 1; DROP TABLE orders", "invalid_sql"),
+    ("SELECT SUM(AGG(o.order_count)) FROM orders AS o", "invalid_agg"),  # 행 수에 따라 값이 달라져 뜻을 정할 수 없다
+    ("SELECT AVG(AGG(o.order_count)) FILTER (WHERE 1 = 1) FROM orders AS o", "invalid_agg"),
 ])
 def test_agg_rejected(model, sql, code):
     with pytest.raises(EngineError) as e:
         rewrite(sql, model, read="sqlite")
     assert e.value.code == code
+
+
+def test_same_value_wrapper_around_agg_is_dropped(con, model):
+    """평가 bird-007: ROUND(AVG(AGG(x)), 2) 가 AVG(AVG(...)) 로 바뀌어 SQLite 가 거절했다. AGG 는 묶음마다 값이 하나다."""
+    want = con.execute(rewrite("SELECT o.order_status, ROUND(AGG(o.order_count), 2) AS n FROM orders AS o GROUP BY 1 ORDER BY 1",
+                               model, "sqlite", "sqlite")["sql"]).fetchall()
+    for wrap in ("AVG", "MIN", "MAX"):
+        out = rewrite(f"SELECT o.order_status, ROUND({wrap}(AGG(o.order_count)), 2) AS n FROM orders AS o GROUP BY 1 ORDER BY 1",
+                      model, "sqlite", "sqlite")
+        assert con.execute(out["sql"]).fetchall() == want
+        assert out["simplified"] == [f"{wrap}(AGG(o.order_count))"] and out["undefined"] == []
+    share = rewrite("SELECT o.order_status, AGG(o.order_count) * 1.0 / SUM(AGG(o.order_count)) OVER () AS share "
+                    "FROM orders AS o GROUP BY 1", model, "sqlite", "sqlite")  # 창 함수는 묶음끼리 계산이라 그대로 둔다
+    assert share["simplified"] == [] and round(sum(r[1] for r in con.execute(share["sql"]).fetchall()), 6) == 1
 
 
 @pytest.mark.parametrize("recursive", ["", "RECURSIVE "])

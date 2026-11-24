@@ -83,3 +83,16 @@ def test_failures_name_their_cause_without_the_token(token, transport, message):
 def test_no_mcp_client_dependency():
     """스냅샷은 MCP 도구가 아니다. MCP 클라이언트 세션으로 되돌아가지 않게 한다."""
     assert not hasattr(graph_client, "ClientSession") and "call_tool" not in open(graph_client.__file__, encoding="utf-8").read()
+
+
+def test_known_version_is_read_from_disk_without_the_server(token):
+    """평가에서 /snapshot 이 t2s 시간의 대부분(P50 2.48초 중 3.06초)이었다. 같은 버전은 다시 받지 않는다."""
+    seen = []
+    assert fetch_model(transport=serve(seen=seen)) == SNAPSHOT  # 처음 받은 버전을 남긴다
+    token.setenv("GRAPH_VERSION_ID", "v1")
+    assert fetch_model("olist_sales", transport=httpx2.MockTransport(fail)) == SNAPSHOT
+    assert len(seen) == 1
+    for version, model in (("v2", None), ("v1", "another_model"), ("../v1", None)):  # 없는 버전, 다른 모델, 경로 문자
+        token.setenv("GRAPH_VERSION_ID", version)
+        fetch_model(model, transport=serve(body={**SNAPSHOT, "model": model or "olist_sales"}, seen=seen))
+    assert len(seen) == 4  # 셋 다 서버에서 받는다

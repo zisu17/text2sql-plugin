@@ -11,6 +11,13 @@ FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 MODEL = FIXTURE_DIR / "olist" / "sales.ossie.yaml"  # 시험용 정의. 테스트 정답이 이 파일에 맞춰져 있다
 GOLDEN = FIXTURE_DIR / "golden_olist.yaml"
 
+
+@pytest.fixture(autouse=True)
+def _cache_dir(tmp_path, monkeypatch):
+    """t2s 가 받은 정의 사본을 실제 홈이 아니라 테스트 폴더에 남기게 한다."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.delenv("GRAPH_VERSION_ID", raising=False)
+
 # o3 는 취소 주문이라 매출·주문 수에서 빠진다. c1 과 c3 은 같은 사람(u1)이다
 FIXTURE_SQL = """
 CREATE TABLE customers (customer_id TEXT PRIMARY KEY, customer_unique_id TEXT, customer_state TEXT);
