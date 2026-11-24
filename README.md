@@ -1,6 +1,6 @@
 # text2sql-plugin
 
-Claude Code와 Codex에서 자연어로 데이터베이스를 조회하는 플러그인입니다. 에이전트가 Graph MCP에서 지표·필드·연결을 찾고 SQL을 직접 씁니다. 정의된 지표는 SQL 안에 `AGG(별칭.지표)`로 넣습니다. 내장된 `t2s`는 그 지표를 정의대로 펼치고, 안전 장치를 검사한 뒤 원본 DB에서 읽기 전용으로 실행합니다. 정의와 다르게 쓴 것(승인 안 된 연결, 정의 밖 테이블·컬럼, 승인 전 지표)은 막지 않고 경고로 알립니다.
+Claude Code와 Codex에서 자연어로 데이터베이스를 조회하는 플러그인입니다. 에이전트가 Graph MCP에서 지표·필드·연결을 찾고 승인 지표는 `t2s compile --run`으로 계산합니다. 복합 SQL에서 사용하는 지표는 SQL 안에 `AGG(별칭.지표)`로 넣습니다. 내장된 `t2s`는 그 지표를 정의대로 펼치고, 안전 장치를 검사한 뒤 원본 DB에서 읽기 전용으로 실행합니다. 정의와 다르게 쓴 것(승인 안 된 연결, 정의 밖 테이블·컬럼, 승인 전 지표)은 막지 않고 경고로 알립니다.
 
 ## 한눈에 보기
 
@@ -58,7 +58,7 @@ uv pip install --python '/path/from/setup/bin/python' 'psycopg[binary]'
 
 ## Graph MCP 연결
 
-플러그인의 `mcp.json`은 [text2sql-graph-mcp](https://text2sql-graph-mcp-production.up.railway.app/mcp) 원격 서버의 연결 정보입니다. 서버 자체는 Railway에서 실행됩니다. 이 서버는 Neo4j에 게시된 활성 시맨틱 모델을 읽습니다. `t2s`는 같은 서버의 `GET /snapshot`에서 실행용 모델을 받아 메모리에서 컴파일합니다. 받은 모델은 버전 번호별로 `~/.cache/t2s/snapshots/`(`XDG_CACHE_HOME`이 있으면 그 아래)에 남깁니다. `GRAPH_VERSION_ID`가 이미 받은 버전이면 서버를 부르지 않고 그 사본을 씁니다. 버전 번호는 정의 파일 내용으로 만들기 때문에 번호가 같으면 내용도 같습니다. 이 경로는 MCP 도구가 아니어서 LLM은 모델 전체를 불러올 수 없습니다. 원본 DB의 행은 MCP가 조회하지 않으므로 실제 값 실행에는 별도 `DATABASE_URL`이 필요합니다.
+플러그인의 `mcp.json`은 [text2sql-graph-mcp](https://text2sql-graph-mcp-production.up.railway.app/mcp) 원격 서버의 연결 정보입니다. 서버 자체는 Railway에서 실행됩니다. 이 서버는 Neo4j에 게시된 활성 시맨틱 모델을 읽습니다. `t2s`는 같은 서버의 `GET /snapshot`에서 실행용 모델을 받아 메모리에서 컴파일합니다. 받은 모델은 접속 주소·인증 정보·버전별로 `~/.cache/t2s/snapshots/`(`XDG_CACHE_HOME`이 있으면 그 아래)에 남깁니다. `GRAPH_VERSION_ID`가 이미 받은 버전이면 인증된 조건부 요청으로 현재 스냅샷과 일치하는지 확인한 뒤 사본을 씁니다. 버전 번호는 정의 파일 내용으로 만들기 때문에 번호가 같으면 내용도 같습니다. 이 경로는 MCP 도구가 아니어서 LLM은 모델 전체를 불러올 수 없습니다. 원본 DB의 행은 MCP가 조회하지 않으므로 실제 값 실행에는 별도 `DATABASE_URL`이 필요합니다.
 
 서버는 Railway 서비스의 `MCP_API_TOKEN`을 Bearer 토큰으로 요구합니다. 비밀번호나 토큰을 이 저장소와 대화에 넣지 마세요.
 
@@ -69,7 +69,7 @@ uv pip install --python '/path/from/setup/bin/python' 'psycopg[binary]'
 
 ## 질문과 스킬
 
-Claude Code에서는 `/text2sql:ask 월별 매출 보여줘`, Codex에서는 `$ask 월별 매출 보여줘`처럼 요청합니다. `ask`는 먼저 Graph MCP의 `graph_search_definitions`(관련도 순 전문 검색)로 게시된 지표를 찾습니다. 같은 뜻의 지표가 있으면 SQL에 `AGG(별칭.지표)`로 넣어 `t2s sql`로 계산합니다. 같은 뜻의 지표가 없으면 계산 기준을 먼저 알리고 SQL 집계로 직접 계산합니다. 같은 뜻의 지표가 승인 전이면 그 지표로 계산하고 승인 전이라고 밝힙니다. 정의 밖 테이블·컬럼이 필요하면 `t2s run`으로 조회하고 답에 밝힙니다. 계산에는 Graph MCP의 활성 모델과 원본 DB의 읽기 전용 접속이 필요합니다.
+Claude Code에서는 `/text2sql:ask 월별 매출 보여줘`, Codex에서는 `$ask 월별 매출 보여줘`처럼 요청합니다. `ask`는 먼저 Graph MCP의 `graph_search_definitions`(관련도 순 전문 검색)로 게시된 지표를 찾습니다. 같은 뜻의 승인 지표는 `t2s compile --run`으로 계산합니다. 직접 계산식과 섞는 복합 질의에서는 `t2s sql`의 `AGG()`를 사용합니다. 같은 뜻의 지표가 없으면 계산 기준을 먼저 알리고 SQL 집계로 직접 계산합니다. 같은 뜻의 지표가 승인 전이면 그 지표로 계산하고 승인 전이라고 밝힙니다. 정의 밖 테이블·컬럼이 필요하면 `t2s run`으로 조회하고 답에 밝힙니다. 계산에는 Graph MCP의 활성 모델과 원본 DB의 읽기 전용 접속이 필요합니다.
 
 | 스킬 | 역할 |
 |---|---|
@@ -90,12 +90,12 @@ Claude Code에서는 `/text2sql:ask 월별 매출 보여줘`, Codex에서는 `$a
 |---|---|
 | `context` | SQL 문법·스키마·정의 번호·정의에 든 테이블을 줍니다(정의 밖 테이블은 `schema`가 보여 줍니다). `--datasets a,b`를 붙이면 그 데이터셋 범위의 정의 요약(`catalog`)도 줍니다 |
 | `schema`, `values` | DB의 모든 테이블과 컬럼(정의 밖은 `outside_definition`에 따로 적음), 필드의 실제 값을 봅니다. `values`는 `dataset.필드`, 정의 밖 컬럼이면 `dataset.컬럼`이나 `테이블.컬럼`으로 부릅니다 |
-| `compile` | Ossie 3층 지표 질의를 SQL로 만듭니다. `--run`을 붙이면 실행합니다. `ask`는 `AGG()`로 쓸 수 없는 모델 수준 지표에만 씁니다 |
-| `sql` | Ossie 2층 SQL을 실행합니다. `AGG(별칭.지표)`는 정의대로 펼치고 SQL 집계는 그대로 계산합니다. `ask`의 기본 경로입니다 |
+| `compile` | Ossie 3층 지표 질의를 SQL로 만듭니다. `--run`을 붙이면 실행합니다. 승인 지표의 기본 경로입니다 |
+| `sql` | Ossie 2층 SQL을 실행합니다. `AGG(별칭.지표)`는 정의대로 펼치고 SQL 집계는 그대로 계산합니다. 직접 집계와 복합 SQL에 씁니다 |
 | `validate`, `run` | 실제 테이블에 쓴 SQL을 검사하거나 검사 후 읽기 전용으로 실행합니다. 집계도 됩니다 |
 | `check` | 정의를 정적으로 검사하거나 DB와 대조합니다 |
 
-예를 들어 다음 두 명령은 정의된 지표로 고객별 주문 수를 계산합니다. `ask`는 두 번째처럼 SQL을 직접 쓰고 지표를 `AGG()`로 넣는 방식을 기본으로 씁니다.
+예를 들어 다음 두 명령은 정의된 지표로 고객별 주문 수를 계산합니다. `ask`는 첫 번째처럼 지표 엔진으로 계산하는 방식을 기본으로 씁니다.
 
 ```bash
 sh scripts/t2s compile order_count --by orders.customer_id --run
@@ -156,7 +156,7 @@ uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.lock
 - SQL은 에이전트가 자유롭게 씁니다. `t2s run`·`t2s validate`·`t2s sql`은 승인되지 않은 연결로 조인해도 막지 않고 `warnings`에 `unapproved_join`으로 알립니다(승인 전 연결인지, 정의에 없는 연결인지 포함). `EXISTS`·`IN (SELECT …)`·스칼라 하위 쿼리로 잇는 조건도 대조합니다. 예전에는 `t2s run`에서 이런 조인을 거절했습니다.
 - 정의 밖 테이블·컬럼도 조회할 수 있고 `outside_definition`으로 알립니다(`t2s run`, `t2s values`, `t2s schema`. `t2s sql`은 정의 데이터셋의 원본이 아닌 테이블만 FROM에 그대로 받습니다). 없는 테이블·컬럼은 실제 DB 기준으로 판단합니다.
 - `t2s run`도 집계를 실행하고 `undefined_calculation`으로 알립니다. 예전에는 행 조회만 받았습니다.
-- `ask`의 기본 지표 경로를 `t2s compile`에서 `t2s sql`로 바꿨습니다. 에이전트가 SQL을 쓰고 정의된 지표는 `AGG(별칭.지표)`로 넣습니다. `t2s compile`은 `AGG()`로 쓸 수 없는 모델 수준 지표에만 씁니다.
+- 승인 지표는 `t2s compile`을 우선합니다. 복합 집계에서는 SQL에 `AGG(별칭.지표)`를 넣어 사용합니다.
 - 승인 전 지표·연결도 막지 않습니다. 승인된 정의만으로 계산할 수 없으면 승인 전 지표를 먼저 넣고, 그래도 안 되면 승인 전 연결까지 넣어 다시 계산한 뒤 `draft`로 알립니다. 지표 목록(`t2s compile`을 지표 없이 부름)에도 승인 전 지표가 상태와 함께 나옵니다.
 - 막는 것은 안전 장치(읽기 전용, 한 문장, 위험 함수, 행 수·시간 제한, 느린 쿼리)뿐입니다. 민감 필드(`sensitivity`) 처리는 지웠습니다. 보호가 필요한 데이터는 DB 계정 권한으로 막습니다.
 - `t2s values`는 `dataset.필드`로 부릅니다. 정의에 필드로 없는 컬럼은 `dataset.컬럼`이나 `테이블.컬럼`으로 보고 `outside_definition`으로 알립니다. `t2s context`의 `tables`는 정의에 든 테이블이고, 정의 밖 테이블은 `t2s schema`가 보여 줍니다.

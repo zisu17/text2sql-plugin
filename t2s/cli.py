@@ -577,7 +577,7 @@ def _sql(db: Database, model: SemanticModel, a: argparse.Namespace) -> None:
             "결과를 확인하고 답에 정의 밖 테이블을 썼다고 밝힌다. 자주 쓰면 정의에 데이터셋 추가를 제안한다")})
     notes = [f"정의 안 된 계산: {', '.join(out['undefined'])}. 정의된 지표가 아니라 SQL 의 집계를 그대로 계산했다. 답에 그렇게 밝힌다"] if out["undefined"] else []
     if out["simplified"]:
-        notes.append(f"{', '.join(out['simplified'])} 는 AGG 값과 같아 AGG 로 계산했다. AGG 는 이미 묶음마다 집계한 값이다")
+        notes.append(f"{', '.join(out['simplified'])} 는 묶음별 AGG 값 하나에 적용했다")
     _log["sql"] = out["sql"]
     safe, err = _check(db, out["sql"], None, engine_sql=True, model=model)  # 확장에 쓴 Graph 버전으로 검증한다
     if err:

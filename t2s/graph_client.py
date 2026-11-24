@@ -3,16 +3,14 @@
 The server exposes the full model at GET /snapshot, outside MCP, so that no LLM can pull it into
 its context. Only this process reads it, to compile and validate SQL in memory.
 
-Each version is kept on disk ($XDG_CACHE_HOME or ~/.cache, t2s/snapshots/<version_id>.json). The version id is
-made from the definition file's bytes, so one id always means the same definition. When GRAPH_VERSION_ID names a
-version already kept there, the server is not called: the answer uses exactly the version the question started with.
+Pinned snapshots are reused only after the authenticated endpoint confirms their ETag.
 """
 
 from __future__ import annotations
 
+from hashlib import sha256
 import json
 import os
-import re
 import tempfile
 from pathlib import Path
 from urllib.parse import quote
@@ -46,13 +44,16 @@ def fetch_model(model: str | None = None, *, transport: httpx2.BaseTransport | N
     token = os.getenv("TEXT2SQL_MCP_TOKEN")
     if not token:
         raise GraphClientError("TEXT2SQL_MCP_TOKEN 이 없다. Graph MCP 인증을 설정한다")
-    cached = _cached(os.getenv("GRAPH_VERSION_ID"), model)
+    url = _snapshot_url(model)
+    namespace = sha256((url + "\0" + token).encode()).hexdigest()
+    expected = os.getenv("GRAPH_VERSION_ID")
+    cached = _cached(namespace, expected, model) if expected else None
+    headers = {"Authorization": f"Bearer {token}"}
     if cached:
-        return cached
+        headers["If-None-Match"] = cached[1]
     try:
-        with httpx2.Client(headers={"Authorization": f"Bearer {token}"}, timeout=httpx2.Timeout(30.0),
-                           transport=transport) as http:
-            response = http.get(_snapshot_url(model))
+        with httpx2.Client(headers=headers, timeout=httpx2.Timeout(30.0), transport=transport) as http:
+            response = http.get(url)
     except httpx2.TimeoutException as error:
         raise GraphClientError("Graph 서버가 30초 안에 응답하지 않았다. 잠시 뒤 다시 시도한다") from error
     except httpx2.TransportError as error:
@@ -60,6 +61,8 @@ def fetch_model(model: str | None = None, *, transport: httpx2.BaseTransport | N
     except Exception as error:  # 잘못된 주소·헤더 값 등. 원문에 토큰이 섞일 수 있어 종류만 적는다
         raise GraphClientError(f"Graph 서버 호출 실패: {type(error).__name__}") from error
     status = response.status_code
+    if status == 304 and cached:
+        return cached[0]
     if status in (401, 403):
         raise GraphClientError(f"Graph 서버가 인증을 거절했다({status}). TEXT2SQL_MCP_TOKEN 값을 확인한다")
     if status == 404:
@@ -75,46 +78,43 @@ def fetch_model(model: str | None = None, *, transport: httpx2.BaseTransport | N
         raise GraphClientError("Graph 서버 응답이 JSON 이 아니다. TEXT2SQL_MCP_URL 주소를 확인한다") from error
     if not isinstance(snapshot, dict) or not isinstance(snapshot.get("definition"), dict):
         raise GraphClientError("Graph 서버 응답에 실행용 정의가 없다")
-    if not snapshot.get("model") or not snapshot.get("version_id"):
+    if not snapshot.get("model") or not isinstance(snapshot.get("version_id"), str) or not snapshot["version_id"]:
         raise GraphClientError("Graph 서버 응답에 모델 또는 활성 버전이 없다")
     if model and snapshot["model"] != model:
         raise GraphClientError("Graph 서버 응답 모델이 요청과 다르다")
-    _store(snapshot)
+    if response.headers.get("etag") == _etag(response.content):
+        _store(_cache_path(namespace, snapshot["version_id"]), response.content)
     return snapshot
 
 
-_VERSION_ID = re.compile(r"[0-9A-Za-z_-]{1,128}")  # 파일 이름으로 쓰므로 경로 문자를 막는다
+def _etag(content: bytes) -> str:
+    return '"' + sha256(content).hexdigest() + '"'
 
 
-def _cache_path(version_id: object) -> Path | None:
-    if not isinstance(version_id, str) or not _VERSION_ID.fullmatch(version_id):
-        return None
-    base = os.getenv("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
-    return Path(base) / "t2s" / "snapshots" / f"{version_id}.json"
+def _cache_path(namespace: str, version: str) -> Path:
+    base = os.getenv("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return Path(base) / "t2s" / "snapshots" / namespace / (sha256(version.encode()).hexdigest() + ".json")
 
 
-def _cached(version_id: str | None, model: str | None) -> dict | None:
-    path = _cache_path(version_id)
+def _cached(namespace: str, version: str, model: str | None) -> tuple[dict, str] | None:
     try:
-        snapshot = json.loads(path.read_text(encoding="utf-8")) if path else None
+        content = _cache_path(namespace, version).read_bytes()
+        snapshot = json.loads(content)
     except (OSError, ValueError):
         return None
-    ok = (isinstance(snapshot, dict) and snapshot.get("version_id") == version_id
-          and isinstance(snapshot.get("definition"), dict) and (not model or snapshot.get("model") == model))
-    return snapshot if ok else None
+    if (isinstance(snapshot, dict) and snapshot.get("version_id") == version
+            and isinstance(snapshot.get("definition"), dict) and (not model or snapshot.get("model") == model)):
+        return snapshot, _etag(content)
+    return None
 
 
-def _store(snapshot: dict) -> None:
-    """버전별 사본을 남긴다. 속도용이라 못 써도 조회는 그대로 된다."""
-    path = _cache_path(snapshot["version_id"])
-    if path is None:
-        return
+def _store(path: Path, content: bytes) -> None:
     tmp = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")  # 본인만 읽는 권한(0600)으로 만든다
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(snapshot, f, ensure_ascii=False)
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
         os.replace(tmp, path)
     except OSError:
         if tmp:

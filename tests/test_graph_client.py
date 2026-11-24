@@ -85,14 +85,31 @@ def test_no_mcp_client_dependency():
     assert not hasattr(graph_client, "ClientSession") and "call_tool" not in open(graph_client.__file__, encoding="utf-8").read()
 
 
-def test_known_version_is_read_from_disk_without_the_server(token):
-    """평가에서 /snapshot 이 t2s 시간의 대부분(P50 2.48초 중 3.06초)이었다. 같은 버전은 다시 받지 않는다."""
+def test_pinned_cache_revalidates_and_is_scoped(token):
+    from hashlib import sha256
+
     seen = []
-    assert fetch_model(transport=serve(seen=seen)) == SNAPSHOT  # 처음 받은 버전을 남긴다
+    current = dict(SNAPSHOT)
+    def server(request):
+        response = httpx2.Response(200, json=current)
+        etag = '"' + sha256(response.content).hexdigest() + '"'
+        candidate = request.headers.get("if-none-match")
+        seen.append(candidate)
+        if candidate == etag:
+            return httpx2.Response(304, headers={"ETag": etag})
+        response.headers["ETag"] = etag
+        return response
+
+    transport = httpx2.MockTransport(server)
     token.setenv("GRAPH_VERSION_ID", "v1")
-    assert fetch_model("olist_sales", transport=httpx2.MockTransport(fail)) == SNAPSHOT
-    assert len(seen) == 1
-    for version, model in (("v2", None), ("v1", "another_model"), ("../v1", None)):  # 없는 버전, 다른 모델, 경로 문자
-        token.setenv("GRAPH_VERSION_ID", version)
-        fetch_model(model, transport=serve(body={**SNAPSHOT, "model": model or "olist_sales"}, seen=seen))
-    assert len(seen) == 4  # 셋 다 서버에서 받는다
+    assert fetch_model(transport=transport) == SNAPSHOT
+    assert fetch_model(transport=transport) == SNAPSHOT
+    assert seen[0] is None and seen[1]
+    with pytest.raises(GraphClientError, match="401"):
+        fetch_model(transport=serve(401))
+    current["version_id"] = "v2"
+    assert fetch_model(transport=transport)["version_id"] == "v2"
+    for key, value in (("TEXT2SQL_MCP_TOKEN", "another-token"), ("TEXT2SQL_MCP_URL", "http://other.test/mcp")):
+        token.setenv(key, value)
+        fetch_model(transport=transport)
+        assert seen[-1] is None

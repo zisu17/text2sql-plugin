@@ -48,6 +48,15 @@ def test_same_value_wrapper_around_agg_is_dropped(con, model):
                       model, "sqlite", "sqlite")
         assert con.execute(out["sql"]).fetchall() == want
         assert out["simplified"] == [f"{wrap}(AGG(o.order_count))"] and out["undefined"] == []
+    ratio = rewrite("SELECT AVG(AGG(o.order_count)) / 2 FROM orders AS o", model, "sqlite", "sqlite")
+    assert con.execute(ratio["sql"]).fetchone()[0] == 1.5
+    for dialect in ("postgres", "duckdb"):
+        with pytest.raises(EngineError) as error:
+            rewrite("SELECT AVG(AGG(o.order_count)) FROM orders AS o", model, dialect, dialect)
+        assert error.value.code == "invalid_agg"
+    window = rewrite("SELECT SUM(AGG(o.order_count)) FILTER (WHERE 1=1) OVER () FROM orders AS o GROUP BY o.order_status",
+                     model, "sqlite", "sqlite")
+    assert {r[0] for r in con.execute(window["sql"])} == {3}
     share = rewrite("SELECT o.order_status, AGG(o.order_count) * 1.0 / SUM(AGG(o.order_count)) OVER () AS share "
                     "FROM orders AS o GROUP BY 1", model, "sqlite", "sqlite")  # 창 함수는 묶음끼리 계산이라 그대로 둔다
     assert share["simplified"] == [] and round(sum(r[1] for r in con.execute(share["sql"]).fetchall()), 6) == 1

@@ -16,7 +16,7 @@ argument-hint: "<SQL과 오류 | 질문>"
 
 **SQL 과 오류**: SQL 을 `t2s validate -` 에 넣어 `problems`·`warnings`·`joins`·`group_by`·`filters` 를 받는다. 오류 메시지는 `error.kind` 로 읽는다.
 
-**질문만**: ask 스킬의 질의 계획 틀을 채우고, 그 질문에 맞는 SQL 을 `t2s validate` 로 확인한다(지표는 `AGG(별칭.지표)` 로 쓴 `t2s sql` SQL, 모델 수준 지표만 `--run` 없는 `t2s compile`). 사용자가 받았던 답이나 SQL 이 있으면 그것과 대조한다.
+**질문만**: ask 스킬의 질의 계획 틀을 채우고, 승인 지표는 `--run` 없는 `t2s compile`로 생성된 SQL을 확인한다. 직접 작성하는 질의는 `t2s validate`로 확인하고 복합 집계에 쓰인 `AGG()`는 해당 지표 정의와 대조한다. 사용자가 받았던 답이나 SQL 이 있으면 그것과 대조한다.
 
 어느 경우든 근거를 더 모아야 하면 `t2s schema <table>` 로 컬럼과 키를, `t2s values <ref> [--like <text>]` 로 필터 값과 시간 범위를 확인한다. 결과 행을 보려고 `t2s run` 을 쓰는 것은 진단에 꼭 필요하고 SELECT 하나로 끝날 때만 한다.
 

@@ -36,7 +36,7 @@ def rewrite(sql: str, model: SemanticModel, read: str = "duckdb", dialect: str =
     if len(trees) != 1 or not isinstance(trees[0], exp.Query):
         raise EngineError("invalid_sql", "SELECT 문 하나만 받는다")
     tree = trees[0]
-    simplified = _unwrap(tree, read)
+    simplified = _unwrap(tree, read, dialect)
     undefined = [n.sql(read) for n in tree.find_all(exp.AggFunc) if not isinstance(n, exp.Agg)]
     _relations(tree, model, physical or set())
     r = _Rewriter(model, tree, allow_draft)
@@ -47,20 +47,28 @@ def rewrite(sql: str, model: SemanticModel, read: str = "duckdb", dialect: str =
             "simplified": simplified}
 
 
-def _unwrap(tree: exp.Expression, read: str) -> list[str]:
-    """같은 SELECT 에서 집계 함수로 감싼 AGG. AGG(x) 는 묶음마다 값이 하나라 AVG·MIN·MAX(AGG(x)) 는 AGG(x) 와 같다.
-    그 셋은 AGG(x) 로 바꾸고 바꾼 식을 돌려준다. 행 수에 따라 값이 달라지는 SUM·COUNT 등은 뜻을 정할 수 없어 오류다.
-    창 함수(SUM(AGG(x)) OVER ())는 묶음끼리 계산하는 올바른 SQL 이라 그대로 둔다."""
+def _unwrap(tree: exp.Expression, read: str, dialect: str) -> list[str]:
+    """묶음 안의 단일 AGG를 감싼 MIN·MAX를 풀고 SQLite AVG의 실수 반환형을 보존한다.
+    윈도 집계는 여러 묶음에 적용되므로 FILTER가 있어도 그대로 둔다."""
     done = []
     for agg in list(tree.find_all(exp.Agg)):
         outer = agg.parent
         while outer is not None and not isinstance(outer, (exp.AggFunc, exp.Select)):
             outer = outer.parent
-        if not isinstance(outer, exp.AggFunc) or isinstance(outer.parent, exp.Window):
+        if not isinstance(outer, exp.AggFunc):
+            continue
+        wrapper = outer.parent if isinstance(outer.parent, exp.Filter) else outer
+        if isinstance(wrapper.parent, exp.Window):
             continue
         if isinstance(outer, (exp.Avg, exp.Min, exp.Max)) and outer.this is agg and not isinstance(outer.parent, exp.Filter):
+            if isinstance(outer, exp.Avg):
+                if dialect != "sqlite":
+                    raise EngineError("invalid_agg", "AVG의 반환형을 보존하려면 하위 쿼리에서 AGG 값을 구한 뒤 AVG를 적용한다")
+                replacement = exp.cast(agg.copy(), "DOUBLE")
+            else:
+                replacement = agg
             done.append(outer.sql(read))
-            outer.replace(agg)
+            outer.replace(replacement)
             continue
         raise EngineError("invalid_agg", f"집계 함수 안에 AGG 를 쓸 수 없음: {outer.sql(read)}",
                           hint="AGG(x) 는 이미 묶음마다 집계한 값이라 AGG(x) 로 그대로 쓴다. 묶음끼리 다시 집계하려면 "
