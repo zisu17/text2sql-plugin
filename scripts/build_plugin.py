@@ -11,6 +11,7 @@ FILES = [
     ROOT / ".mcp.json",
     ROOT / "LICENSE",
     ROOT / "pyproject.toml",
+    ROOT / "requirements.lock",
     ROOT / "scripts" / "t2s",
     *sorted((ROOT / "agents").glob("*.md")),
     *sorted((ROOT / "hooks").glob("*.json")),
