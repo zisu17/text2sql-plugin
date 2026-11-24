@@ -30,11 +30,11 @@ from .db import Database, type_family
 from .definition import findings, uncovered
 from .engine import BUILD, EngineError, SemanticModel, source_table
 from .measures import rewrite
-from .guard import UnsafeSQL, lint, policy, prepare, shape, table_names
-from .ossie import READ, expr_sql, ext, is_time, read_yaml
+from .guard import UnsafeSQL, dataset_join_warnings, lint, policy, prepare, relationships, shape, table_names
+from .ossie import READ, expr_sql, is_time, read_yaml, status
 
 # 가드 거절 중 SQL 을 고쳐 다시 시도해도 되는 것. policy 는 질문의 뜻을 바꿔야 해서 다시 시도하지 않는다
-_RETRYABLE = {"syntax", "unknown_table", "unknown_column", "unknown_join", "missing_object", "type_mismatch"}
+_RETRYABLE = {"syntax", "unknown_table", "unknown_column", "missing_object", "type_mismatch"}
 # ponytail: 메시지 정규식 분류. 문법 오류와 방언 오류는 구분하지 못한다
 _DB_ERRORS = [
     ("missing_object", re.compile(r"no such table|no such column|no such function|does not exist", re.I)),
@@ -45,7 +45,6 @@ _DB_ERRORS = [
 ]
 # 없는 DB 드라이버 모듈 → 설치할 패키지
 _DRIVERS = {"psycopg": "psycopg[binary]", "psycopg2": "psycopg2-binary", "MySQLdb": "mysqlclient", "pymysql": "pymysql"}
-_DATETIME = {"DateTime", "DateTimeTz"}  # 날짜만 있는 Date 는 = '날짜' 비교가 맞다
 _log: dict = {}  # 이번 호출의 사용 기록(T2S_LOG). main 이 끝날 때 한 줄로 쓴다
 
 
@@ -57,6 +56,21 @@ def _emit(obj: dict) -> None:
 def _fail(obj: dict) -> None:
     _emit(obj)
     sys.exit(1)
+
+
+def _emit_query(out: dict, compact: bool) -> None:
+    if compact and ("result" in out or "rows" in out or "error" in out):
+        out = {key: value for key, value in out.items() if key in {
+            "ok", "error", "result", "rows", "columns", "truncated", "measures", "extensions",
+            "preview", "source", "notes", "warnings",
+        }}
+        if "result" in out:
+            out["result"] = {key: value for key, value in out["result"].items()
+                             if key in {"ok", "rows", "columns", "truncated"}}
+        for key in ("notes", "warnings", "extensions", "measures"):
+            if not out.get(key):
+                out.pop(key, None)
+    (_fail if "error" in out else _emit)(out)
 
 
 class _Parser(argparse.ArgumentParser):
@@ -117,44 +131,59 @@ def _sql_arg(sql: str) -> str:
     return sys.stdin.read() if sql == "-" else sql
 
 
-def _check(db: Database, sql: str, read: str | None, model: SemanticModel | None,
+def _check(db: Database, sql: str, read: str | None, model: SemanticModel,
            engine_sql: bool = False) -> tuple[str | None, UnsafeSQL | None]:
     """가드 검사. (통과한 SQL, None) 또는 (None, 거절)."""
     try:
         rules = policy(db, model, engine_sql)
+        if rules["columns"] is not None:  # 정의 필드가 아니라 실제 DB 컬럼으로 없는 컬럼을 잡는다. 정의 밖 컬럼은 lint 가 알린다
+            rules["columns"] = _db_columns(db, rules["columns"], shape(sql, db.dialect, read)["tables"])
         return prepare(sql, db.dialect, max_rows=db.max_rows, schema=db.schema, read=read, **rules), None
     except UnsafeSQL as e:
         return None, e
 
 
-def _lint(db: Database, model: SemanticModel | None, sql: str, read: str | None) -> list[dict]:
-    """경고. 시간 컬럼·연결은 정의가 있으면 정의(is_time 필드 중 식이 컬럼 하나인 것, 승인된 연결), 없으면 DB 컬럼 타입과 FK."""
+def _db_columns(db: Database, defined: dict[str, set[str]], used: list[str] = ()) -> dict[str, set[str]]:
+    """정의 테이블과 SQL 이 읽는 DB 테이블(used)마다 실제 컬럼(소문자). 읽지 못하면 정의 필드로 대신한다."""
+    out = {}
+    for t in {*defined, *(u for u in used if u in db.tables)}:
+        name = db.tables.get(t)
+        try:
+            out[t] = {c["name"].lower() for c in db._insp.get_columns(name, schema=db.schema)} if name else set(defined.get(t, ()))
+        except SQLAlchemyError:
+            out[t] = set(defined.get(t, ()))
+    return out
+
+
+def _lint(db: Database, model: SemanticModel, sql: str, read: str | None, physical: bool = True) -> list[dict]:
+    """경고. 시간 컬럼은 정의의 is_time 필드 중 식이 컬럼 하나인 것(Date 제외), 연결은 정의의 연결로 본다.
+    physical 이면(run·validate, 실제 테이블 이름으로 쓴 SQL) 승인 안 된 조인과 정의 밖 컬럼도 알린다. t2s sql 은 데이터셋 이름이라 따로 본다."""
     try:
-        return _lint_inputs(db, model, sql, read)
+        return _lint_inputs(db, model, sql, read, physical)
     except (SqlglotError, SQLAlchemyError, ValueError, KeyError):  # 경고는 덤이다. 실패해도 명령은 그대로 간다
         return []
 
 
-def _lint_inputs(db: Database, model: SemanticModel | None, sql: str, read: str | None) -> list[dict]:
-    if model:
-        times = set()
-        for (d, _), f in model.fields.items():
-            if is_time(f) and f.get("datatype") != "Date":
-                e = sqlglot.parse_one(expr_sql(f), read=READ)
-                table = source_table(model.datasets[d])
-                if isinstance(e, exp.Column) and table:
-                    times.add(f"{table.rpartition('.')[2]}.{e.name.lower()}")
-        return lint(sql, db.dialect, read, times, policy(db, model)["edges"])
-    times, edges = set(), {}
-    for t in shape(sql, db.dialect, read)["tables"]:  # 쓴 테이블만 DB 에 묻는다
-        if t not in db.tables:
-            continue
-        name = db.tables[t]
-        times |= {f"{t}.{c['name'].lower()}" for c in db._insp.get_columns(name, schema=db.schema)
-                  if type_family(db.type_name(c["type"])) in _DATETIME}
-        edges[t] = [{"from": t, "to": fk["referred_table"].lower(), "from_columns": fk["constrained_columns"],
-                     "to_columns": fk["referred_columns"]} for fk in db._insp.get_foreign_keys(name, schema=db.schema)]
-    return lint(sql, db.dialect, read, times, edges)
+def _lint_inputs(db: Database, model: SemanticModel, sql: str, read: str | None, physical: bool = True) -> list[dict]:
+    times = set()
+    for (d, _), f in model.fields.items():
+        if is_time(f) and f.get("datatype") != "Date":
+            e = sqlglot.parse_one(expr_sql(f), read=READ)
+            table = source_table(model.datasets[d])
+            if isinstance(e, exp.Column) and table:
+                times.add(f"{table.rpartition('.')[2]}.{e.name.lower()}")
+    rel = relationships(model)
+    if not physical:
+        return lint(sql, db.dialect, read, times, rel["edges"])
+    defined = policy(db, model)["columns"]
+    columns = _db_columns(db, defined, shape(sql, db.dialect, read)["tables"])
+    warnings = lint(sql, db.dialect, read, times, rel["edges"], rel["drafts"], columns, joins=True, defined=defined)
+    aggs = shape(sql, db.dialect, read)["aggregates"]
+    if aggs:
+        warnings.append({"kind": "undefined_calculation", "message": (
+            f"정의된 지표가 아니라 SQL 의 집계({', '.join(aggs)})를 그대로 계산했다. 같은 뜻의 지표가 있으면 t2s sql 의 AGG(별칭.지표) 나 "
+            "t2s compile 을 쓰고, 없으면 답에 직접 계산한 기준을 밝힌다")})
+    return warnings
 
 
 def _guard_error(e: UnsafeSQL) -> dict:
@@ -184,7 +213,7 @@ def _column_hint(sql: str, model: SemanticModel, message: str, read: str) -> str
     for table in tree.find_all(exp.Table):
         dataset = datasets.get(table.name.lower())
         definition = model.fields.get((dataset, field)) if dataset else None
-        if definition and not (definition.get("sensitivity") or ext(definition).get("sensitivity")):
+        if definition:
             candidates.append(f"{table.alias_or_name}.{field}")
     candidates = list(dict.fromkeys(candidates))
     return f"{field} 컬럼은 이미 사용한 {candidates[0]} 에 있다. 컬럼 별칭을 확인한다" if len(candidates) == 1 else None
@@ -241,46 +270,88 @@ def _compile(a: argparse.Namespace) -> None:
     try:
         out = {**engine.build(model, a), **metadata}
     except EngineError as e:
-        _fail({"error": e.to_dict(), "warnings": warnings, **source})
+        if a.allow_draft or e.code not in _DRAFT_HELPS:
+            _fail({"error": e.to_dict(), "warnings": warnings, **source})
+        # 승인된 지표·연결로 안 되면 승인 전 것을 넣어 다시 만든다. 막지 않고 승인 전이라고 알린다.
+        # 승인 전 지표만으로 되면 연결은 승인된 것만 쓴다. 승인 전 연결이 다른 길을 더 만들어 경로가 모호해지지 않게 한다
+        out = None
+        for drafts, joins in _draft_attempts(e.code):
+            a.allow_draft, a.draft_joins = drafts, joins
+            try:
+                out = engine.build(model, a)
+                break
+            except EngineError as again:
+                if again.code not in _DRAFT_HELPS:
+                    break
+        if out is None:
+            _fail({"error": e.to_dict(), "warnings": warnings, **source})
+        warnings.append(_draft_warning(model, _metric_names(out), a.draft_joins))
+        out = {**out, **source, "warnings": warnings, "preview": True}
+        _log["preview"] = True
     _log["sql"] = out.get("sql")
     if db is None or "sql" not in out:
         return _emit(out)
     safe, err = _check(db, out["sql"], None, engine_sql=True, model=model)
     if err:
-        _fail({**out, "ok": False, "error": _guard_error(err)})
+        return _emit_query({**out, "ok": False, "error": _guard_error(err)}, a.compact)
     result = _execute(db, safe, a.force)
-    if not result["ok"]:
-        _fail({**out, **result})
-    _emit({**out, "result": result})
+    _emit_query({**out, "result": result} if result["ok"] else {**out, **result}, a.compact)
 
 
-def _values(db: Database, model: SemanticModel | None, ref: str, like: str | None, limit: int, *,
+_DRAFT_HELPS = {"metric_not_approved", "no_join_path", "unrelated_datasets", "no_anchor"}  # 승인 전 지표·연결을 넣으면 풀릴 수 있는 실패
+
+
+def _draft_attempts(code: str) -> list[tuple[bool, bool]]:
+    """(승인 전 지표, 승인 전 연결)을 켜 볼 차례. 실패 원인에 맞는 것을 먼저 켜고, 그래도 안 되면 둘 다 켠다."""
+    first = (True, False) if code == "metric_not_approved" else (False, True)
+    return [first, (True, True)]
+
+
+def _metric_names(out: dict) -> list[str]:
+    """엔진 출력의 질의(--query JSON 포함)에서 지표 이름."""
+    return [m if isinstance(m, str) else m.get("metric", "") for m in (out.get("query") or {}).get("metrics") or []]
+
+
+def _draft_warning(model: SemanticModel, names: list[str], joins: bool = False) -> dict:
+    drafts = [k for k, m in model.metrics.items() if status(m) != "approved" and (k in names or k.rpartition(".")[2] in names)]
+    used = [f"승인 전 지표 {', '.join(drafts)}"] if drafts else []
+    used += ["승인 전 연결"] if joins else []
+    return {"kind": "draft", "message": (f"승인 전 정의를 넣어 계산했다({'; '.join(used) or '승인 전 정의'}). "
+                                         "검토 중인 정의라 값이 바뀔 수 있다. 답에 승인 전 정의로 계산했다고 밝힌다")}
+
+
+def _values(db: Database, model: SemanticModel, ref: str, like: str | None, limit: int, *,
             definition: str | None = None) -> None:
-    """필드(정의가 없으면 컬럼)의 실제 값. SQL 은 sqlglot 노드로 만들어 --like 문자열이 SQL 로 읽히지 않게 하고 가드를 거친다."""
+    """dataset.field 의 실제 값. 정의 필드가 아니어도 데이터셋의 실제 테이블에 있는 컬럼이면 보여 주고 정의 밖이라고 알린다.
+    SQL 은 sqlglot 노드로 만들어 --like 문자열이 SQL 로 읽히지 않게 하고 가드를 거친다."""
     def fail(kind: str, message: str) -> None:
         _fail({"error": {"kind": kind, "message": message, "retryable": kind in _RETRYABLE}})
 
     d, _, n = ref.partition(".")
-    if model:
-        if d not in model.datasets:
-            fail("unknown_table", f"없는 데이터셋: {d} (데이터셋: {', '.join(model.datasets)})")
+    if d not in model.datasets and d.lower() not in db.tables:
+        fail("unknown_table", f"없는 데이터셋·테이블: {d} (데이터셋: {', '.join(model.datasets)})")
+    warnings = []
+    if (d, n) in model.fields:
         try:
             e, source = model._field(d, n), model._table(d)
         except EngineError as x:
-            fail("unknown_column" if x.code == "unknown_field" else "bad_definition", f"{x} {x.candidates or ''}".strip())
+            fail("bad_definition", f"{x} {x.candidates or ''}".strip())
         f = model.fields[(d, n)]
-        if f.get("sensitivity") or ext(f).get("sensitivity"):
-            fail("policy", f"{ref} 는 민감 정보로 표시돼 값을 보여 주지 않는다")
         table, timed = source_table(model.datasets[d]) or d, is_time(f)
-    else:
-        table = db.tables.get(d.lower())
-        if not table:
-            fail("unknown_table", f"없는 테이블: {d}")
-        col = next((c for c in db._insp.get_columns(table, schema=db.schema) if c["name"].lower() == n.lower()), None)
+    else:  # 정의에 없는 컬럼·테이블: 데이터셋의 실제 테이블이나 DB 테이블의 컬럼을 본다
+        fields = [f"{d}.{x}" for dd, x in model.fields if dd == d]
+        physical = source_table(model.datasets[d]) if d in model.datasets else d.lower()
+        name = db.tables.get(physical.rpartition(".")[2]) if physical else None
+        col = next((c for c in db._insp.get_columns(name, schema=db.schema) if c["name"].lower() == n.lower()), None) if name else None
         if col is None:
-            fail("unknown_column", f"{table} 에 없는 컬럼: {n}")
-        e, source = exp.column(col["name"], table=table), exp.table_(table, db=db.schema)
-        timed = type_family(db.type_name(col["type"])) in {"Date", "Time", *_DATETIME}
+            where = "조회문 데이터셋은 정의 필드만 본다" if not physical else f"{name or physical} 테이블에도 없다"
+            fail("unknown_column", f"없는 필드: {ref} ({where}). 필드: {', '.join(fields)}")
+        table = name
+        e, source = exp.column(col["name"], table=name), exp.table_(name, db=db.schema)
+        timed = type_family(db.type_name(col["type"])) in {"Date", "Time", "DateTime", "DateTimeTz"}
+        warnings.append({"kind": "outside_definition", "message": (
+            f"{ref} 는 정의에 필드로 없는 {name}.{col['name']} 컬럼이다. 뜻·단위가 정의로 확인되지 않았으니 답에 밝힌다. "
+            "자주 쓰면 정의에 필드 추가를 제안한다")})
     column = e.name if isinstance(e, exp.Column) else e.sql(BUILD)
     if timed:
         q = exp.select(exp.Min(this=e.copy()).as_("lo"), exp.Max(this=e.copy()).as_("hi"),
@@ -298,7 +369,7 @@ def _values(db: Database, model: SemanticModel | None, ref: str, like: str | Non
         result = db.execute(safe)
     except SQLAlchemyError as x:
         _fail({"error": _db_error(x)})
-    head = {"ref": ref, "table": table, "column": column, **_local_source(definition)}
+    head = {"ref": ref, "table": table, "column": column, **_local_source(definition), **({"warnings": warnings} if warnings else {})}
     if timed:
         lo, hi, nn, rows = result["rows"][0]
         return _emit({**head, "kind": "time", "min": lo, "max": hi, "non_null": nn, "rows": rows})
@@ -392,12 +463,14 @@ def _parser() -> argparse.ArgumentParser:
     v = sub.add_parser("sql", help="2층 SQL 실행. FROM 에 데이터셋, 지표는 AGG(별칭.지표). 조인으로 늘어난 행도 한 번만 센다")
     v.add_argument("sql", help="SQL. - 면 stdin")
     v.add_argument("--read", help="SQL 을 쓴 문법. 없으면 대상 DB 문법")
-    v.add_argument("--allow-draft", action="store_true", help="미리 보기: 승인 전 지표도 쓴다. 답변에는 쓰지 않는다")
+    v.add_argument("--allow-draft", action="store_true", help="미리 보기: 승인 전 지표도 AGG() 로 쓴다. 답변에는 쓰지 않는다")
     v.add_argument("--force", action="store_true", help="실행 계획상 오래 걸릴 SQL 도 실행한다(시간 제한은 그대로)")
     v = sub.add_parser("values", help="필드의 실제 값(범주형은 값별 행 수, 시간형은 범위)")
-    v.add_argument("ref", help="정의가 있으면 dataset.field, 없으면 table.column")
+    v.add_argument("ref", help="dataset.field")
     v.add_argument("--like", help="대소문자 무시 부분 일치")
     v.add_argument("--limit", type=int, default=20, help="값 개수(최대 100)")
+    for name in ("run", "compile", "sql"):
+        sub.choices[name].add_argument("--compact", action="store_true", help="실행 결과에서 반복되는 SQL과 진단을 생략")
     for name in ("schema", "values", "compile"):
         sub.choices[name].add_argument("--definition", metavar="PATH", help="게시 전 미리 보기에 사용할 로컬 정의 파일")
     c = sub.add_parser("check", help="정의 검사(문제가 있어도 exit 0)")
@@ -457,8 +530,8 @@ def _main(argv: list[str]) -> None:
     if a.cmd == "context":
         _emit(_context(db, model, definition, a.datasets))
     elif a.cmd == "schema":
-        only = table_names(policy(db, model)["allowed_tables"])
-        out = {"describe": db.describe(a.tables, only=only)} if a.tables else {"tables": db.table_list(only=only)}
+        defined = table_names(model.tables())
+        out = {"describe": db.describe(a.tables)} if a.tables else {"tables": db.table_list(), "outside_definition": sorted(set(db.tables) - defined)}
         _emit({**out, **_local_source(definition)})
     elif a.cmd == "validate":
         sql = _sql_arg(a.sql)
@@ -473,39 +546,48 @@ def _main(argv: list[str]) -> None:
         warnings = _lint(db, model, sql, a.read)
         safe, err = _check(db, sql, a.read, model=model)
         if err:
-            _fail({"ok": False, "error": _guard_error(err), "warnings": warnings})
+            return _emit_query({"ok": False, "error": _guard_error(err), "warnings": warnings}, a.compact)
         result = _execute(db, safe, a.force)
-        (_emit if result["ok"] else _fail)({**result, "warnings": warnings})
+        _emit_query({**result, "warnings": warnings}, a.compact)
     elif a.cmd == "values":
         _values(db, model, a.ref, a.like, max(1, min(a.limit, 100)), definition=definition)
     elif a.cmd == "sql":
         _sql(db, model, a)
 
 
-def _sql(db: Database, model: SemanticModel | None, a: argparse.Namespace) -> None:
+def _sql(db: Database, model: SemanticModel, a: argparse.Namespace) -> None:
     """2층 SQL: 데이터셋을 표로, 지표를 AGG(별칭.지표)로 쓴 SQL 을 계산한다. 정의 안 된 집계도 계산하되 notes 에 적는다."""
-    if not model:
-        _fail({"error": {"kind": "graph_unavailable", "message": "Graph MCP에서 활성 정의를 읽지 못했다"}})
     _log["executed"] = True
     sql = _sql_arg(a.sql)
-    warnings = _lint(db, model, sql, a.read)
+    read = a.read or db.dialect
+    # 조인은 막지 않는다. 펼치기 전 데이터셋 이름으로 정의의 연결과 대조해 다르면 알린다
+    warnings = _lint(db, model, sql, a.read, physical=False) + dataset_join_warnings(sql, read, model)
+    outside = set(db.tables) - table_names(model.tables())  # 정의 밖 DB 테이블은 FROM 에 그대로 쓸 수 있다
     try:
-        out = rewrite(sql, model, read=a.read or db.dialect, dialect=db.dialect, allow_draft=a.allow_draft)
+        out = rewrite(sql, model, read=read, dialect=db.dialect, allow_draft=a.allow_draft, physical=outside)
     except EngineError as e:
-        _fail({"ok": False, "error": e.to_dict(), "warnings": warnings})
+        if a.allow_draft or e.code != "metric_not_approved":
+            return _emit_query({"ok": False, "error": e.to_dict(), "warnings": warnings}, a.compact)
+        out = rewrite(sql, model, read=read, dialect=db.dialect, allow_draft=True, physical=outside)  # 승인 전 지표도 막지 않고 알린다
+        warnings.append(_draft_warning(model, out["measures"]))
+    used = sorted(set(shape(sql, db.dialect, read)["tables"]) & outside - set(n.lower() for n in model.datasets))
+    if used:
+        warnings.append({"kind": "outside_definition", "message": (
+            f"정의에 없는 테이블을 읽었다: {', '.join(used)}. 뜻·키가 정의로 확인되지 않았다. "
+            "결과를 확인하고 답에 정의 밖 테이블을 썼다고 밝힌다. 자주 쓰면 정의에 데이터셋 추가를 제안한다")})
     notes = [f"정의 안 된 계산: {', '.join(out['undefined'])}. 정의된 지표가 아니라 SQL 의 집계를 그대로 계산했다. 답에 그렇게 밝힌다"] if out["undefined"] else []
     _log["sql"] = out["sql"]
     safe, err = _check(db, out["sql"], None, engine_sql=True, model=model)  # 확장에 쓴 Graph 버전으로 검증한다
     if err:
-        _fail({**out, "ok": False, "notes": notes, "warnings": warnings, "error": _guard_error(err)})
+        return _emit_query({**out, "ok": False, "notes": notes, "warnings": warnings, "error": _guard_error(err)}, a.compact)
     result = _execute(db, safe, a.force)
     if not result["ok"]:
         if result["error"]["kind"] == "missing_object":
             hint = _column_hint(sql, model, result["error"]["message"], a.read or db.dialect)
             if hint:
                 result["error"]["hint"] = hint
-        _fail({**out, **result, "notes": notes, "warnings": warnings})
-    _emit({**out, "notes": notes, "warnings": warnings, "result": result})
+        return _emit_query({**out, **result, "notes": notes, "warnings": warnings}, a.compact)
+    _emit_query({**out, "notes": notes, "warnings": warnings, "result": result}, a.compact)
 
 
 if __name__ == "__main__":

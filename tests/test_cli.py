@@ -33,12 +33,33 @@ def t2s(capsys, *argv, code=None):
 
 
 def test_draft_preview_and_local_definition_ignored(env, capsys):
-    """승인 전 지표는 미리 보기로만 실행되고 로컬 정의 경로는 조회에 영향을 주지 않는다."""
-    assert t2s(capsys, "compile", "avg_delivery_days", "--run", code=1)["error"]["code"] == "metric_not_approved"
+    """승인 전 지표도 막지 않고 계산하되 승인 전이라고 알린다. 로컬 정의 경로는 조회에 영향을 주지 않는다."""
+    out = t2s(capsys, "compile", "avg_delivery_days", "--run")
+    assert out["preview"] is True and out["result"]["rows"] == [[7.5]]
+    assert [w["kind"] for w in out["warnings"]] == ["draft"] and "orders.avg_delivery_days" in out["warnings"][0]["message"]
+    assert {m["name"]: m["status"] for m in t2s(capsys, "compile")["metrics"]}["orders.avg_delivery_days"] == "draft"  # 목록에도 보인다
     out = t2s(capsys, "compile", "avg_delivery_days", "--allow-draft", "--run")
     assert out["preview"] is True and out["result"]["rows"] == [[7.5]] and any(w["kind"] == "preview" for w in out["warnings"])
     env.setenv("SEMANTIC_MODEL", "nope.yaml")
     assert t2s(capsys, "context")["definition"]["version_id"] == "published-v1"
+
+
+def test_draft_metric_retry_keeps_approved_joins(env, capsys):
+    """승인 전 지표로 다시 계산할 때 연결은 승인된 것만 쓴다. 승인 전 연결이 다른 길을 더 만들어도 경로가 모호해지지 않는다."""
+    doc = yaml.safe_load(MODEL.read_text(encoding="utf-8"))
+    reviews = next(d for d in doc["datasets"] if d["name"] == "order_reviews")
+    reviews.setdefault("metrics", []).append({"name": "review_rows", "expression": {"sql": "COUNT(review_id)"},
+                                              "nonportable_extensions": [{"vendor_name": "TEXT2SQL", "data": {"status": "draft"}}]})
+    reviews["fields"].append({"name": "customer_id", "expression": {"sql": "order_id"}, "datatype": "String"})
+    doc["relationships"].append({"name": "reviews_to_customers", "from": "order_reviews", "to": "customers",
+                                 "from_columns": ["customer_id"], "to_columns": ["customer_id"],
+                                 "nonportable_extensions": [{"vendor_name": "TEXT2SQL", "data": {"status": "draft"}}]})
+    env.setattr(cli, "fetch_model", lambda model=None: {"version_id": "published-v4", "definition": doc})
+    out = t2s(capsys, "compile", "order_reviews.review_rows", "--by", "customers.customer_state")
+    assert "sql" in out and [w["kind"] for w in out["warnings"]] == ["draft"]
+    assert "order_reviews.review_rows" in out["warnings"][0]["message"] and "승인 전 연결" not in out["warnings"][0]["message"]
+    query = t2s(capsys, "compile", "--query", '{"metrics": ["order_reviews.review_rows"]}')
+    assert "order_reviews.review_rows" in query["warnings"][0]["message"]  # --query 로 불러도 지표 이름을 알린다
 
 
 def test_local_definition_preview(env, capsys, tmp_path):
@@ -84,7 +105,7 @@ def test_local_definition_preview(env, capsys, tmp_path):
     assert values["source"] == source and values["values"] == [{"value": "delivered", "count": 2}]
 
     command = ("compile", "late_delivery_rate", "--by", "orders.order_purchase_timestamp__month", "--run", *option)
-    assert t2s(capsys, *command, code=1)["error"]["code"] == "metric_not_approved"
+    assert any(w["kind"] == "draft" for w in t2s(capsys, *command)["warnings"])  # 승인 전 지표도 계산한다
     out = t2s(capsys, *command, "--allow-draft")
     assert out["source"] == source and out["preview"] is True
     assert dict(out["result"]["rows"]) == {"2018-01-01": 0.5, "2018-02-01": None}
@@ -123,8 +144,9 @@ def test_context_and_schema(env, capsys):
     assert out["dialect"] == "sqlite" and set(out) == {"dialect", "schema", "max_rows", "readonly_guarantee", "definition", "tables"}
     assert t2s(capsys, "context", "예전 호출이 넘기던 질문 원문") == out
     assert out["tables"] == ["customers", "order_items", "order_payments", "order_reviews", "orders", "product_category_name_translation", "products", "sellers"]
-    listed = t2s(capsys, "schema")["tables"]
-    assert "orders" in listed and "payments_pii" not in listed
+    schema = t2s(capsys, "schema")
+    assert "orders" in schema["tables"] and "payments_pii" in schema["tables"]  # 정의 밖 테이블도 보인다
+    assert schema["outside_definition"] == ["payments_pii"]
     assert "price" in t2s(capsys, "schema", "order_items")["describe"]
 
 
@@ -165,19 +187,23 @@ def test_validate(env, capsys):
     assert out["ok"] and out["joins"] == [{"left": "order_items.order_id", "right": "orders.order_id"}]
     for sql, kind in [
         ("DELETE FROM orders", "policy"),
-        ("SELECT nope FROM orders", "unknown_column"),
-        ("SELECT * FROM orders o JOIN products p ON o.order_id = p.product_id", "unknown_join"),
+        ("SELECT nope FROM orders", "unknown_column"),  # 실제 DB 에도 없는 컬럼
     ]:
         out = t2s(capsys, "validate", sql)
         assert not out["ok"] and out["problems"][0]["kind"] == kind, sql
+    out = t2s(capsys, "validate", "SELECT o.order_id FROM orders o JOIN products p ON o.order_id = p.product_id")
+    assert out["ok"] and [w["kind"] for w in out["warnings"]] == ["unapproved_join"]  # 막지 않고 알린다
     env.setenv("SEMANTIC_MODEL", "nope.yaml")
-    assert not t2s(capsys, "validate", "SELECT SUM(price) FROM order_items")["ok"]
+    out = t2s(capsys, "validate", "SELECT SUM(price) FROM order_items")
+    assert out["ok"] and [w["kind"] for w in out["warnings"]] == ["undefined_calculation"]
 
 
 def test_run(env, capsys):
     out = t2s(capsys, "run", "SELECT o.order_id, i.price FROM order_items i JOIN orders o ON i.order_id = o.order_id")
     assert out["ok"] and len(out["rows"]) == 5 and "elapsed_ms" in out
-    err = t2s(capsys, "run", "SELECT SUM(price) FROM order_items", code=1)["error"]
+    out = t2s(capsys, "run", "SELECT SUM(price) AS s FROM order_items")  # 집계도 실행한다. 정의된 지표가 아니라고 알린다
+    assert out["ok"] and out["rows"] and [w["kind"] for w in out["warnings"]] == ["undefined_calculation"]
+    err = t2s(capsys, "run", "DELETE FROM orders", code=1)["error"]
     assert err["kind"] == "policy" and err["retryable"] is False
     err = t2s(capsys, "run", "SELECT * FROM nope", code=1)["error"]
     assert err["kind"] == "unknown_table" and err["retryable"] is True
@@ -231,15 +257,9 @@ def test_values(env, capsys, tmp_path):
     assert err["kind"] == "unknown_column" and err["retryable"]
     assert t2s(capsys, "values", "nope.x", code=1)["error"]["kind"] == "unknown_table"
 
-    doc = yaml.safe_load(MODEL.read_text(encoding="utf-8"))
-    field = next(f for d in doc["datasets"] if d["name"] == "customers" for f in d["fields"] if f["name"] == "customer_state")
-    set_ext(field, sensitivity="pii")
-    (tmp_path / "pii.yaml").write_text(yaml.safe_dump(doc, allow_unicode=True), encoding="utf-8")
-    env.setattr(cli, "fetch_model", lambda model=None: {"version_id": "published-v2", "definition": doc})
-    err = t2s(capsys, "values", "customers.customer_state", code=1)["error"]
-    assert err["kind"] == "policy" and "SP" not in json.dumps(err)
-
-    assert t2s(capsys, "values", "payments_pii.card_no", code=1)["error"]["kind"] == "unknown_table"
+    pii = t2s(capsys, "values", "payments_pii.card_no")  # 정의 밖 테이블도 보되 정의 밖이라고 알린다
+    assert pii["kind"] == "categorical" and pii["warnings"][0]["kind"] == "outside_definition"
+    assert t2s(capsys, "values", "nope_table.x", code=1)["error"]["kind"] == "unknown_table"
     assert t2s(capsys, "values", "orders.order_purchase_timestamp")["kind"] == "time"
     assert t2s(capsys, "values", "orders.nope", code=1)["error"]["kind"] == "unknown_column"
 
@@ -269,8 +289,8 @@ def test_warnings(env, capsys, tmp_path):
     out = t2s(capsys, "run", "SELECT order_id FROM orders WHERE order_purchase_timestamp <= '2018-01-20'")
     assert out["rows"] == [["o1"]] and [w["kind"] for w in out["warnings"]] == ["date_literal"]  # o2(1/20 10시)가 빠진다
     assert "< '2018-01-21'" in out["warnings"][0]["message"]
-    out = t2s(capsys, "run", "SELECT SUM(price) FROM order_items WHERE 1 = 1", code=1)
-    assert out["warnings"] == []
+    out = t2s(capsys, "run", "SELECT SUM(price) FROM order_items WHERE 1 = 1")
+    assert [w["kind"] for w in out["warnings"]] == ["undefined_calculation"]
     half_open = "SELECT order_id FROM orders WHERE order_purchase_timestamp >= '2018-01-20' AND order_purchase_timestamp < '2018-01-21'"
     assert t2s(capsys, "validate", half_open)["warnings"] == []
     out = t2s(capsys, "compile", "revenue", "--where", "orders.order_purchase_timestamp = '2018-01-05'")
@@ -313,13 +333,16 @@ def test_sql(env, capsys):
     assert out["undefined"] == ["SUM(i.price)"] and "정의 안 된 계산" in out["notes"][0]
     out = t2s(capsys, "sql", "SELECT COUNT(*) FROM orders WHERE order_purchase_timestamp <= '2018-01-20'")
     assert [warning["kind"] for warning in out["warnings"]] == ["date_literal"]
-    assert t2s(capsys, "sql", "SELECT AGG(o.avg_delivery_days) FROM orders AS o", code=1)["error"]["code"] == "metric_not_approved"
+    out = t2s(capsys, "sql", "SELECT AGG(o.avg_delivery_days) AS d FROM orders AS o")  # 승인 전 지표도 계산하고 알린다
+    assert out["result"]["rows"] == [[7.5]] and [w["kind"] for w in out["warnings"]] == ["draft"]
 
 
 def test_sql_rejects_physical_table_and_reports_execution_error(env, capsys):
     """2층 SQL 은 데이터셋만 읽고 실행 오류를 다른 명령과 같은 위치에 돌려준다."""
     err = t2s(capsys, "sql", "SELECT order_id FROM main.orders", code=1)["error"]
-    assert err["code"] == "unknown_relation"
+    assert err["code"] == "unknown_relation"  # 데이터셋의 원본 테이블은 데이터셋 이름으로 쓴다
+    out = t2s(capsys, "sql", "SELECT AGG(o.order_count) AS n, (SELECT COUNT(*) FROM payments_pii) AS p FROM orders AS o")
+    assert out["result"]["rows"] == [[3, 0]] and [w["kind"] for w in out["warnings"]] == ["outside_definition"]
     with sqlite3.connect(cli.os.environ["DATABASE_URL"].removeprefix("sqlite:///")) as con:
         con.execute("ALTER TABLE orders ADD COLUMN internal_secret TEXT DEFAULT 'hidden'")
     out = t2s(capsys, "sql", "SELECT internal_secret FROM ORDERS", code=1)
@@ -332,9 +355,55 @@ def test_sql_missing_column_suggests_joined_dataset_alias(env, capsys):
     sql = ("SELECT p.product_category_name_english FROM products AS p "
            "JOIN product_category_name_translation AS t "
            "ON t.product_category_name = p.product_category_name")
+    # products → 번역 표 연결은 승인 전(draft)이다. 막지 않고 실행하며 승인 전 연결로 붙였다고 알린다
     out = t2s(capsys, "sql", sql, code=1)
+    assert any("승인 전 연결 products_to_category_translation" in w["message"] for w in out["warnings"])
     assert out["error"]["kind"] == "missing_object"
     assert "t.product_category_name_english" in out["error"]["hint"]
+
+
+@pytest.mark.parametrize("sql, ok", [
+    # 승인 연결의 키가 아닌 컬럼으로 잇는다
+    ("SELECT COUNT(*) AS n FROM order_items AS i JOIN customers AS c ON i.order_id = c.customer_id", False),
+    # 승인 전(draft) 연결 order_items → sellers
+    ("SELECT s.seller_state, COUNT(*) AS n FROM order_items AS i JOIN sellers AS s ON i.seller_id = s.seller_id GROUP BY 1", False),
+    # 상관 하위 쿼리로 잘못된 키를 잇는다(2-2)
+    ("SELECT COUNT(*) AS n FROM orders AS o WHERE EXISTS (SELECT 1 FROM order_items AS i WHERE i.product_id = o.order_id)", False),
+    # 승인 연결
+    ("SELECT c.customer_state, AGG(o.order_count) AS n FROM orders AS o JOIN customers AS c ON o.customer_id = c.customer_id GROUP BY 1", True),
+    ("SELECT c.customer_state, AGG(o.order_count) AS n FROM orders AS o JOIN customers AS c USING (customer_id) GROUP BY 1", True),
+    ("SELECT COUNT(*) AS n FROM orders AS o WHERE EXISTS (SELECT 1 FROM order_items AS i WHERE i.order_id = o.order_id)", True),
+    # 하위 쿼리로 고른 집계 값과 비교하는 것은 연결이 아니라 값 필터다
+    ("SELECT COUNT(*) AS n FROM orders AS o WHERE o.order_purchase_timestamp = (SELECT MAX(x.order_purchase_timestamp) FROM orders AS x)", True),
+    ("SELECT COUNT(*) AS n FROM orders AS o WHERE o.customer_id IN (SELECT MAX(c.customer_id) FROM customers AS c)", True),
+    ("SELECT COUNT(*) AS n FROM orders AS o WHERE o.order_id IN (SELECT CAST(i.product_id AS TEXT) FROM order_items AS i)", False),
+    # CTE 로 먼저 집계한 뒤 키를 그대로 넘겨 잇는다
+    ("WITH t AS (SELECT i.order_id, SUM(i.price) AS s FROM order_items AS i GROUP BY i.order_id) "
+     "SELECT o.order_status, SUM(t.s) AS s FROM t JOIN orders AS o ON t.order_id = o.order_id GROUP BY 1", True),
+])
+def test_sql_joins_follow_approved_relationships(env, capsys, sql, ok):
+    """t2s sql 은 조인을 막지 않는다. 승인된 연결이 아니면 결과와 함께 경고한다. 펼치기 전 데이터셋 이름으로 대조한다."""
+    out = t2s(capsys, "sql", sql)
+    assert out["result"]["ok"]
+    joins = [w for w in out["warnings"] if w["kind"] == "unapproved_join"]
+    assert (joins == []) is ok, joins
+
+
+def test_run_explores_outside_definition(env, capsys):
+    """정의에 없는 테이블·컬럼·연결로도 조회할 수 있다. 정의 밖이라고 알린다. 실제로 없는 테이블·컬럼만 막는다."""
+    with sqlite3.connect(cli.os.environ["DATABASE_URL"].removeprefix("sqlite:///")) as con:
+        con.execute("ALTER TABLE orders ADD COLUMN internal_note TEXT DEFAULT 'n'")
+    out = t2s(capsys, "run", "SELECT o.order_id, o.internal_note FROM orders o LIMIT 2")
+    assert out["ok"] and [w["kind"] for w in out["warnings"]] == ["outside_definition"]
+    out = t2s(capsys, "run", "SELECT i.order_id, s.seller_state FROM order_items i JOIN sellers s ON i.seller_id = s.seller_id LIMIT 2")
+    assert out["ok"] and any("승인 전 연결" in w["message"] for w in out["warnings"])
+    values = t2s(capsys, "values", "orders.internal_note")
+    assert values["values"] == [{"value": "n", "count": 4}] and values["warnings"][0]["kind"] == "outside_definition"
+    assert t2s(capsys, "values", "orders.nope", code=1)["error"]["kind"] == "unknown_column"
+    out = t2s(capsys, "run", "SELECT card_no FROM payments_pii")
+    assert out["ok"] and any("payments_pii" in w["message"] for w in out["warnings"] if w["kind"] == "outside_definition")
+    assert t2s(capsys, "run", "SELECT * FROM nope_table", code=1)["error"]["kind"] == "unknown_table"
+    assert t2s(capsys, "run", "SELECT o.nope FROM orders o", code=1)["error"]["kind"] == "unknown_column"
 
 
 @pytest.mark.parametrize("sql, kind", [
@@ -353,6 +422,25 @@ def test_context_uses_graph_version(env, capsys):
     assert out["definition"]["source"] == "graph_mcp"
     env.setenv("GRAPH_VERSION_ID", "other-version")
     assert t2s(capsys, "context", code=1)["error"]["kind"] == "graph_unavailable"
+
+
+def test_local_context_and_compact_output(env, capsys):
+    out = t2s(capsys, "compile", "orders.order_count", "--run", "--compact")
+    assert out["result"]["rows"] == [[3]]
+    assert "sql" not in out and "executed_sql" not in out["result"]
+    out = t2s(capsys, "run", "SELECT COUNT(*) FROM orders", "--compact")
+    assert out["rows"] == [[4]] and "executed_sql" not in out
+    assert any(w["kind"] == "undefined_calculation" for w in out["warnings"])
+    out = t2s(capsys, "sql", "SELECT COUNT(*) FROM orders", "--compact")
+    assert out["result"]["rows"] == [[4]] and "sql" not in out and out["notes"]
+
+    def no_graph(*args, **kwargs):
+        raise AssertionError("Graph를 호출했다")
+
+    env.setattr(cli, "fetch_model", no_graph)
+    out = t2s(capsys, "context", "--local")
+    assert out["dialect"] == "sqlite" and set(out) == {"dialect", "schema", "max_rows", "readonly_guarantee"}
+    assert t2s(capsys, "context", "--local", "--datasets", "orders", code=1)["error"]["kind"] == "bad_args"
 
 
 def test_one_graph_snapshot_per_command(env, capsys):

@@ -10,7 +10,7 @@ ask, diagnose 스킬과 sql-reviewer 에이전트가 같이 쓰는 분류다. �
 
 ## F2 잘못된 조인 경로
 
-연결에 없는 키로 조인했거나 중간 테이블을 건너뛰었다. 신호는 `unknown_join`, compile 의 `no_join_path`, `t2s validate` 의 `joins` 가 `t2s context` 의 연결(relationships)과 맞지 않는 경우다. SQL 을 고치고, 정당한 경로인데 연결이 없으면 정의에 연결 추가를 제안한다.
+연결에 없는 키로 조인했거나 중간 테이블을 건너뛰었다. 신호는 `warnings` 의 `unapproved_join`(막지는 않는다), compile 의 `no_join_path`, `t2s validate` 의 `joins` 가 승인된 연결(`graph_list_join_rules`, 또는 `t2s context --datasets` 의 `catalog` 연결 절)과 맞지 않는 경우다. SQL 을 고치고, 정당한 경로인데 연결이 없으면 정의에 연결 추가를 제안한다.
 
 ## F3 1:N fan-out
 

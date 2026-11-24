@@ -18,13 +18,17 @@ from sqlglot.errors import SqlglotError
 from sqlglot.optimizer.scope import Scope, build_scope
 
 from .engine import BUILD, SemanticModel, _outer_aggregates
-from .ossie import EngineError, ext, status
+from .ossie import EngineError, status
 
 _DATASET = "t2s_dataset"  # 데이터셋 표로 바꾼 SELECT 의 meta 표시
 
 
-def rewrite(sql: str, model: SemanticModel, read: str = "duckdb", dialect: str = "sqlite", allow_draft: bool = False) -> dict:
-    """AGG 를 계산하는 SQL 로 바꾼다. {"sql", "measures": 쓴 측정, "undefined": 정의 안 된 집계}."""
+def rewrite(sql: str, model: SemanticModel, read: str = "duckdb", dialect: str = "sqlite", allow_draft: bool = False,
+            physical: set[str] | None = None) -> dict:
+    """AGG 를 계산하는 SQL 로 바꾼다. {"sql", "measures": 쓴 측정, "undefined": 정의 안 된 집계}.
+
+    physical(소문자 테이블 이름)은 FROM 에 그대로 둘 정의 밖 DB 테이블이다. 데이터셋의 원본 테이블은 넣지 않는다
+    (그 테이블은 데이터셋 이름으로 써야 AGG 로 지표를 계산할 수 있다)."""
     try:
         trees = sqlglot.parse(sql, read=read)
     except SqlglotError as err:
@@ -33,7 +37,7 @@ def rewrite(sql: str, model: SemanticModel, read: str = "duckdb", dialect: str =
         raise EngineError("invalid_sql", "SELECT 문 하나만 받는다")
     tree = trees[0]
     undefined = [n.sql(read) for n in tree.find_all(exp.AggFunc) if not isinstance(n, exp.Agg)]
-    _relations(tree, model)
+    _relations(tree, model, physical or set())
     r = _Rewriter(model, tree, allow_draft)
     for scope in build_scope(tree).traverse():  # 안쪽 블록부터
         r.block(scope)
@@ -41,8 +45,8 @@ def rewrite(sql: str, model: SemanticModel, read: str = "duckdb", dialect: str =
     return {"sql": tree.sql(dialect, pretty=True), "measures": list(dict.fromkeys(r.used)), "undefined": undefined}
 
 
-def _relations(tree: exp.Expression, model: SemanticModel) -> None:
-    """FROM 의 데이터셋 이름을 그 데이터셋의 필드 표(하위 쿼리)로 바꾼다. CTE 이름은 건드리지 않는다. 민감 필드는 넣지 않는다."""
+def _relations(tree: exp.Expression, model: SemanticModel, physical: set[str]) -> None:
+    """FROM 의 데이터셋 이름을 그 데이터셋의 필드 표(하위 쿼리)로 바꾼다. CTE 이름은 건드리지 않는다."""
     names = {name.lower(): name for name in model.datasets}
     for scope in build_scope(tree).traverse():
         for alias, src in list(scope.sources.items()):
@@ -56,9 +60,12 @@ def _relations(tree: exp.Expression, model: SemanticModel) -> None:
             if not src.db and not src.catalog and parent:
                 continue
             d = names.get(src.name.lower()) if not src.catalog and (not src.db or src.db.lower() == model.name.lower()) else None
+            if d is None and not src.catalog and src.name.lower() in physical:
+                continue  # 정의 밖 DB 테이블은 그대로 읽는다. CLI 가 정의 밖이라고 알린다
             if d is None:
-                raise EngineError("unknown_relation", f"FROM 에는 정의된 데이터셋만 쓴다: {src.sql()}", sorted(model.datasets))
-            fields = [n for (dd, n), f in model.fields.items() if dd == d and not (f.get("sensitivity") or ext(f).get("sensitivity"))]
+                raise EngineError("unknown_relation", f"FROM 에는 데이터셋이나 정의 밖 DB 테이블을 쓴다. 정의된 데이터셋의 원본 테이블은 데이터셋 이름으로 쓴다: {src.sql()}",
+                                  sorted(model.datasets))
+            fields = [n for dd, n in model.fields if dd == d]
             sel = sqlglot.parse_one(f"SELECT {', '.join(f'{model._field(d, n).sql(BUILD)} AS {n}' for n in fields)} FROM {model._table(d)}", read=BUILD)
             sel.meta[_DATASET] = d
             src.replace(sel.subquery(alias))

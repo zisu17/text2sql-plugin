@@ -808,7 +808,7 @@ def build(model: SemanticModel, a: argparse.Namespace) -> dict:
     """
     args = a.metrics or a.by or a.where or a.order or a.limit
     if a.query is None and not (a.metrics or a.by):
-        return {"metrics": model.list_metrics(a.allow_draft)}
+        return {"metrics": model.list_metrics(True)}  # 승인 전 지표도 status 와 함께 보여 준다
     if a.query is not None:
         if args:
             raise EngineError("invalid_query", "--query 와 지표 이름·--by·--where·--order·--limit 은 함께 쓰지 않는다", ossie="E_INVALID_QUERY")
@@ -820,7 +820,8 @@ def build(model: SemanticModel, a: argparse.Namespace) -> dict:
         q = model.as_query(a.metrics, a.by, a.where, a.order, a.limit)
     if a.expr and a.strict:
         raise EngineError("invalid_query", "--strict 에서는 지표끼리 계산(--expr)을 하지 않는다", ossie="E_INVALID_QUERY")
-    out = model.query(q, a.dialect, a.allow_draft, draft_joins=a.allow_draft, strict=a.strict)
+    # 승인 전 지표와 승인 전 연결은 따로 켤 수 있다(draft_joins 가 없으면 --allow-draft 를 따른다)
+    out = model.query(q, a.dialect, a.allow_draft, draft_joins=getattr(a, "draft_joins", a.allow_draft), strict=a.strict)
     if a.expr:
         n = len(q.get("dimensions") or [])
         out["sql"] = derive(out["sql"], a.expr, out["columns"][:n], out["columns"][n:])

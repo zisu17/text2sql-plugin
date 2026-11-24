@@ -23,12 +23,14 @@ maxTurns: 8
 
 ## 쓸 수 있는 명령
 
-Bash로는 `t2s context`, `t2s schema <table ...>`, `t2s values <ref> [--like <text>] [--limit N]`, `t2s validate -`만 쓴다. 모든 호출에서 출처의 Graph 모델과 버전을 `GRAPH_MODEL`·`GRAPH_VERSION_ID`로 전달한다. DB 출처가 "환경변수 그대로"면 기존 `DATABASE_URL`을 사용한다. `t2s validate`의 실행 허용 판정은 행 조회 기준이다. 집계 SQL을 검토할 때는 실제 실행 경로의 진단을 확인한다. SQL을 고쳐 다시 실행하는 일은 호출자의 몫이다. `t2s`를 찾지 못하면 출처에 받은 경로로 부른다.
+Bash로는 `t2s context [--datasets <dataset,...>]`, `t2s schema <table ...>`, `t2s values <ref> [--like <text>] [--limit N]`, `t2s validate -`만 쓴다. 모든 호출에서 출처의 Graph 모델과 버전을 `GRAPH_MODEL`·`GRAPH_VERSION_ID`로 전달한다. DB 출처가 "환경변수 그대로"면 기존 `DATABASE_URL`을 사용한다. `t2s validate`의 실행 허용 판정은 행 조회 기준이다. 집계 SQL을 검토할 때는 실제 실행 경로의 진단을 확인한다. SQL을 고쳐 다시 실행하는 일은 호출자의 몫이다. `t2s`를 찾지 못하면 출처에 받은 경로로 부른다.
+
+MCP 도구는 쓸 수 없다. `t2s context`만 부르면 문법과 정의 번호만 오고 정의 요약은 오지 않는다. 연결과 지표 정의는 SQL에 나온 데이터셋 이름으로 `t2s context --datasets <dataset,...>`를 불러 `catalog`에서 확인한다. 없는 이름이면 `unknown_table` 메시지의 데이터셋 목록에서 고른다. `catalog`의 연결 절은 from 쪽이 여러 행, to 쪽이 한 행이다. `t2s sql`용 SQL의 `AGG(별칭.측정)`은 승인 지표를 기본키마다 한 번만 세는 계산이고, 날짜 필드 뒤의 `__day`·`__week`·`__month`·`__quarter`·`__year`는 묶는 단위다.
 
 ## 검토 순서
 
 1. 질문과 질의 계획을 대조한다. 계획의 출력 열과 결과의 `columns`를 하나씩 확인한다. 목록의 식별자나 별도로 요구된 수치가 빠지면 F9다.
-2. `t2s context`의 연결과 SQL의 조인 조건을 대조한다. 행 조회는 `validate.joins`도 확인한다. 연결에 없는 조인이나 건너뛴 경로는 F2다. 한 행 쪽 값을 여러 행 쪽과 조인한 뒤 합산하면 F3다.
+2. `t2s context --datasets <SQL에 나온 데이터셋>`의 `catalog` 연결 절과 SQL의 조인 조건을 대조한다. 행 조회는 `validate.joins`와 `warnings`의 `unapproved_join`도 확인한다. 승인 안 된 연결은 그 자체로 틀린 것이 아니다. 질문에 맞는 키인지, 행이 늘거나 빠지는지 보고, 답에 밝히지 않았으면 issue 로 적는다. 연결에 없는 조인이나 건너뛴 경로는 F2다. 한 행 쪽 값을 여러 행 쪽과 조인한 뒤 합산하면 F3다.
 3. 결과 한 행의 단위(grain)와 `group_by`·집계 대상이 질문의 묶음과 맞는지 본다(F4). 비율이면 분자·분모의 대상과 필터가 같은지 본다(F5).
 4. 시간 조건이 반열림인지 본다. `warnings` 의 `date_literal` 이나 닫힌 날짜 비교는 F6 이다.
 5. 필터 문자열 값마다 근거를 확인한다. 근거가 "정의 문구"가 아니면 `t2s values <ref> --like` 로 실제 값이 있는지 확인한다(F8). NULL 이 많은 컬럼을 세거나 평균하면 F7 이다.
