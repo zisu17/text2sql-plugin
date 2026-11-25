@@ -20,7 +20,7 @@ argument-hint: "[질문 또는 관심 주제]"
 t2s context
 ```
 
-2. 관심 주제의 정의를 Graph MCP에서 범위를 좁혀 찾는다. `graph_search_definitions(query, kinds?)`로 지표·필드·데이터셋을 찾고 `graph_get_dataset(dataset)`으로 그 데이터셋의 필드와 지표를 본다. 연결은 `graph_list_join_rules(dataset)`로, 두 데이터셋 사이의 경로는 `graph_find_join_path(datasets)`로 본다. 지표의 계산 지침(기간 기준 등)까지 필요하면 그 데이터셋만 요약으로 받는다.
+2. 관심 주제의 지표·필드·데이터셋은 `graph_search_definitions(query, kinds?)`로 찾는다. 검색은 기본 1건이다. 여러 항목을 요청받으면 필요한 수를 `limit`으로 지정한다. 첫 후보가 부족하면 `has_more`가 참일 때 검색 범위를 넓힌다. `graph_get_dataset(dataset)`으로 해당 데이터셋의 필드와 지표를 본다. 연결은 `graph_list_join_rules(dataset)`로 확인하고 두 데이터셋 사이의 경로는 `graph_find_join_path(datasets)`로 본다. 계산 지침까지 필요하면 해당 데이터셋만 요약으로 받는다.
 
 ```bash
 t2s context --datasets <dataset,dataset>

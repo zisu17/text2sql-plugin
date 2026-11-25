@@ -32,7 +32,7 @@ codex plugin add text2sql@text2sql-plugin
 Codex에서는 첫 사용 전에 일반 터미널에서 `t2s`를 설치합니다. 플러그인을 업데이트한 뒤에도 다시 실행합니다.
 
 ```bash
-sh ~/.codex/plugins/cache/text2sql-plugin/text2sql/0.6.0/scripts/t2s setup
+sh ~/.codex/plugins/cache/text2sql-plugin/text2sql/0.6.1/scripts/t2s setup
 ```
 
 설치 위치가 다르면 해당 플러그인 폴더의 `scripts/t2s` 경로를 사용합니다. 스킬은 `t2s`가 PATH에 없을 때 이 스크립트를 `sh`로 실행합니다.
@@ -148,6 +148,10 @@ uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.lock
 두 번째 명령(`build_plugin.py`)은 Claude 업로드용 `dist/text2sql.plugin`을 만듭니다. 빌드 스크립트는 개발용 파일과 링크를 제외합니다. Ossie 공식 적합성 사례는 외부 저장소와 DuckDB를 준비한 뒤 `OSSIE_DIR=/path/to/ossie uv run --with duckdb pytest tests/test_ossie_compliance.py`로 실행합니다.
 
 ## 변경 사항
+
+### 0.6.1
+
+- 지표 검색과 정의 탐색은 후보 한 건으로 시작합니다. 첫 결과로 판단하기 어렵고 추가 후보가 있으면 검색 범위를 넓힙니다.
 
 ### 0.6.0 (깨지는 변경)
 
