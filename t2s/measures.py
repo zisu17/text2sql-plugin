@@ -17,7 +17,7 @@ from sqlglot import exp
 from sqlglot.errors import SqlglotError
 from sqlglot.optimizer.scope import Scope, build_scope
 
-from .engine import BUILD, SemanticModel, _outer_aggregates
+from .engine import BUILD, SemanticModel, _date_diff_days, _outer_aggregates
 from .ossie import EngineError, status
 
 _DATASET = "t2s_dataset"  # 데이터셋 표로 바꾼 SELECT 의 meta 표시
@@ -39,7 +39,7 @@ def rewrite(sql: str, model: SemanticModel, read: str = "duckdb", dialect: str =
     simplified = _unwrap(tree, read, dialect)
     undefined = [n.sql(read) for n in tree.find_all(exp.AggFunc) if not isinstance(n, exp.Agg)]
     _relations(tree, model, physical or set())
-    r = _Rewriter(model, tree, allow_draft)
+    r = _Rewriter(model, tree, allow_draft, dialect)
     for scope in build_scope(tree).traverse():  # 안쪽 블록부터
         r.block(scope)
     r.attach()
@@ -108,8 +108,8 @@ def _relations(tree: exp.Expression, model: SemanticModel, physical: set[str]) -
 
 
 class _Rewriter:
-    def __init__(self, model: SemanticModel, tree: exp.Expression, allow_draft: bool):
-        self.model, self.tree, self.allow_draft = model, tree, allow_draft
+    def __init__(self, model: SemanticModel, tree: exp.Expression, allow_draft: bool, dialect: str):
+        self.model, self.tree, self.allow_draft, self.dialect = model, tree, allow_draft, dialect
         self.ctes: list[tuple[exp.CTE | None, exp.CTE]] = []  # (이 CTE 앞에 넣는다. None 이면 맨 끝, 넣을 CTE)
         self.passed: dict[tuple[int, str], tuple] = {}  # (SELECT, 컬럼) → 넘긴 측정
         self.used: list[str] = []
@@ -208,7 +208,7 @@ class _Rewriter:
                 value = exp.Filter(this=a, expression=exp.Where(this=first.copy()))
             else:
                 a.replace(exp.Filter(this=a.copy(), expression=exp.Where(this=first.copy())))
-        return value
+        return value.transform(lambda node: _date_diff_days(node, self.dialect))
 
     def _measure(self, scope: Scope, alias: str, name: str) -> tuple[str, list[exp.Expression], dict[str, exp.Expression]]:
         """scope 에서 alias.name 이 가리키는 측정. (지표 키, 기본키 식들, {필드: 식})."""

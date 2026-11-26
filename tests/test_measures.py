@@ -24,6 +24,21 @@ def test_agg_counts_each_row_once(con, model):
     assert total == [(0,)]  # 묶음 없는 질의는 행이 없어도 한 행, COUNT 는 0
 
 
+def test_agg_uses_calendar_days_for_metric_date_diff(model):
+    from conftest import make_db
+
+    con = make_db()
+    try:
+        con.execute("UPDATE orders SET order_purchase_timestamp = '2018-01-05 23:50:00', "
+                    "order_delivered_customer_date = '2018-01-06 00:05:00' WHERE order_id = 'o1'")
+        sql = "SELECT AGG(o.avg_delivery_days) FROM orders o WHERE o.order_id = 'o1'"
+        expanded = rewrite(sql, model, "sqlite", "sqlite", allow_draft=True)
+        compiled = model.compile(["avg_delivery_days"], where=["orders.order_id = 'o1'"], allow_draft=True)
+        assert con.execute(expanded["sql"]).fetchall() == con.execute(compiled).fetchall() == [(1.0,)]
+    finally:
+        con.close()
+
+
 @pytest.mark.parametrize("sql, code", [
     ("SELECT AGG(o.nope) FROM orders AS o", "unknown_measure"),
     ("SELECT AGG(o.avg_delivery_days) FROM orders AS o", "metric_not_approved"),  # 승인 전 지표
