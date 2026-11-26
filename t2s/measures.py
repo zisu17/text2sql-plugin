@@ -55,7 +55,7 @@ def _unwrap(tree: exp.Expression, read: str, dialect: str) -> list[str]:
         if isinstance(agg.parent, exp.Filter) and agg.parent.this is agg:
             raise EngineError(
                 "invalid_agg", "AGG(...)에 FILTER를 직접 붙일 수 없음",
-                hint="대상 행을 WHERE로 거른 뒤 AGG로 계산한다. 기간별 조건이 다르면 각 기간을 별도로 묶어 계산한 뒤 결과를 합친다",
+                hint="대상 행을 WHERE로 거른 뒤 AGG로 계산한다. 집계마다 대상이 다르면 각 조건으로 집계한 결과를 합친다",
             )
         outer = agg.parent
         while outer is not None and not isinstance(outer, (exp.AggFunc, exp.Select)):

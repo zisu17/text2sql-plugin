@@ -1,7 +1,10 @@
 """2층 SQL(AGG) 점검: 데이터셋을 표로 쓰고, 조인으로 늘어난 행도 측정은 기본키마다 한 번만 센다. Ossie 공식 사례는 test_ossie_compliance."""
+from contextlib import closing
+import sqlite3
+
 import pytest
 
-from t2s.engine import EngineError
+from t2s.engine import EngineError, SemanticModel
 from t2s.measures import rewrite
 
 FAN_OUT = """
@@ -24,19 +27,33 @@ def test_agg_counts_each_row_once(con, model):
     assert total == [(0,)]  # 묶음 없는 질의는 행이 없어도 한 행, COUNT 는 0
 
 
-def test_agg_uses_calendar_days_for_metric_date_diff(model):
-    from conftest import make_db
-
-    con = make_db()
-    try:
-        con.execute("UPDATE orders SET order_purchase_timestamp = '2018-01-05 23:50:00', "
-                    "order_delivered_customer_date = '2018-01-06 00:05:00' WHERE order_id = 'o1'")
-        sql = "SELECT AGG(o.avg_delivery_days) FROM orders o WHERE o.order_id = 'o1'"
-        expanded = rewrite(sql, model, "sqlite", "sqlite", allow_draft=True)
-        compiled = model.compile(["avg_delivery_days"], where=["orders.order_id = 'o1'"], allow_draft=True)
-        assert con.execute(expanded["sql"]).fetchall() == con.execute(compiled).fetchall() == [(1.0,)]
-    finally:
-        con.close()
+def test_calendar_day_metric_and_qualified_order_on_incidents():
+    model = SemanticModel({
+        "name": "support",
+        "datasets": [{
+            "name": "incidents",
+            "source": "tickets",
+            "primary_key": ["ticket_id"],
+            "fields": [{"name": name, "expression": {"sql": name}}
+                       for name in ("ticket_id", "queue", "opened_at", "resolved_at")],
+            "metrics": [{
+                "name": "avg_calendar_days",
+                "expression": {"sql": "AVG(DATEDIFF('day', opened_at, resolved_at))"},
+                "nonportable_extensions": [{"vendor_name": "TEXT2SQL", "data": {"status": "approved"}}],
+            }],
+        }],
+    })
+    with closing(sqlite3.connect(":memory:")) as con:
+        con.executescript("""
+            CREATE TABLE tickets (ticket_id INTEGER PRIMARY KEY, queue TEXT, opened_at TEXT, resolved_at TEXT);
+            INSERT INTO tickets VALUES
+                (1, 'ops', '2025-02-01 23:50:00', '2025-02-02 00:05:00'),
+                (2, 'billing', '2025-02-01 09:00:00', '2025-02-01 10:00:00');
+        """)
+        sql = "SELECT i.queue, AGG(i.avg_calendar_days) FROM incidents i GROUP BY i.queue ORDER BY i.queue DESC"
+        expanded = rewrite(sql, model, "sqlite", "sqlite")["sql"]
+        compiled = model.compile(["avg_calendar_days"], ["incidents.queue"], order_by=["-incidents.queue"])
+        assert con.execute(expanded).fetchall() == con.execute(compiled).fetchall() == [("ops", 1.0), ("billing", 0.0)]
 
 
 @pytest.mark.parametrize("sql, code", [
