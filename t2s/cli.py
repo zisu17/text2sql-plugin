@@ -39,7 +39,7 @@ _RETRYABLE = {"syntax", "unknown_table", "unknown_column", "missing_object", "ty
 _DB_ERRORS = [
     ("missing_object", re.compile(r"no such table|no such column|no such function|does not exist", re.I)),
     ("unknown_column", re.compile(r"ambiguous column name|column(?: reference)? .+? is ambiguous", re.I)),
-    ("syntax", re.compile(r"syntax error", re.I)),
+    ("syntax", re.compile(r"syntax error|circular reference", re.I)),
     ("timeout", re.compile(r"interrupted|statement timeout|canceling statement", re.I)),
     ("type_mismatch", re.compile(r"datatype mismatch|operator does not exist|invalid input syntax|cannot be cast", re.I)),
 ]
@@ -195,6 +195,8 @@ def _db_error(e: SQLAlchemyError) -> dict:
     kind = next((k for k, pattern in _DB_ERRORS if pattern.search(message)), "db")
     if kind == "timeout":
         message += " — 질문의 범위를 유지하고 상관 하위 쿼리·중복 전체 스캔·조인 실행 계획을 줄여 다시 작성한다. 집계 뒤 LIMIT 은 계산량을 줄이지 않는다"
+    if kind == "syntax" and "circular reference" in message.lower():
+        message += " — CTE와 원본 테이블의 이름이 같으면 CTE 이름과 그 참조를 바꾼다"
     return {"kind": kind, "message": message, "retryable": kind in _RETRYABLE}
 
 

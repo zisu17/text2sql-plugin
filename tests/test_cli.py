@@ -409,6 +409,7 @@ def test_run_explores_outside_definition(env, capsys):
 @pytest.mark.parametrize("sql, kind", [
     ("SELECT order_id FROM orders o JOIN order_items i ON o.order_id = i.order_id", "unknown_column"),
     ("SELECT unsupported_sql_function(order_id) FROM orders", "missing_object"),
+    ("WITH orders AS (SELECT * FROM orders) SELECT * FROM orders", "syntax"),
 ])
 def test_sql_reports_repairable_db_query_errors(env, capsys, sql, kind):
     error = t2s(capsys, "sql", sql, code=1)["error"]
