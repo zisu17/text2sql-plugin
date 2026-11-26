@@ -30,6 +30,15 @@ def test_numbers(con, model):
     assert rows(con, model, ["order_count"], ["products.product_category_name"]) == [("beleza", 2), ("esporte", 2)]
 
 
+def test_order_by_selected_qualified_dimension(con, model):
+    field = "customers.customer_state"
+    sql = model.compile(["order_count"], [field], order_by=[f"-{field}"])
+    assert con.execute(sql).fetchall() == [("SP", 2), ("RJ", 1)]
+    with pytest.raises(EngineError) as error:
+        model.compile(["order_count"], [field], order_by=["orders.customer_id"])
+    assert error.value.code == "unknown_column"
+
+
 def _same(got: list, want: list) -> bool:
     """숫자는 소수 둘째 자리까지, 문자열은 앞부분('2018-01' ≈ '2018-01-01')으로 비교한다."""
     if not want:  # 결과 없음: 행이 없거나 집계가 NULL 한 행

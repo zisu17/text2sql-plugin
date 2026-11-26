@@ -32,6 +32,7 @@ def test_agg_counts_each_row_once(con, model):
     ("SELECT 1; DROP TABLE orders", "invalid_sql"),
     ("SELECT SUM(AGG(o.order_count)) FROM orders AS o", "invalid_agg"),  # 행 수에 따라 값이 달라져 뜻을 정할 수 없다
     ("SELECT AVG(AGG(o.order_count)) FILTER (WHERE 1 = 1) FROM orders AS o", "invalid_agg"),
+    ("SELECT AGG(o.order_count) FILTER (WHERE o.order_status = 'delivered') FROM orders AS o", "invalid_agg"),
 ])
 def test_agg_rejected(model, sql, code):
     with pytest.raises(EngineError) as e:

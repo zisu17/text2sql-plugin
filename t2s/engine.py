@@ -414,6 +414,20 @@ class SemanticModel:
         else:
             sql = self._combine(homes, comps, values, dims, filters, names[nd:])
         if order_by:
+            # A qualified dimension may be selected under an alias. Only infer an
+            # output name when the request selects that dimension exactly once.
+            dimension_names: dict[str, list[str]] = {}
+            for (ref, _), name in zip(dims_in, names[:nd]):
+                if "." in ref:
+                    dimension_names.setdefault(ref, []).append(name)
+            mapped = []
+            for order in order_by:
+                key = order.lstrip("-")
+                candidates = dimension_names.get(key, [])
+                if key not in names and len(candidates) == 1:
+                    order = ("-" if order.startswith("-") else "") + candidates[0]
+                mapped.append(order)
+            order_by = mapped
             unknown = [o for o in order_by if o.lstrip("-") not in names]
             if unknown:
                 raise EngineError("unknown_column", f"정렬할 컬럼이 결과에 없음: {', '.join(unknown)}", names)

@@ -52,6 +52,11 @@ def _unwrap(tree: exp.Expression, read: str, dialect: str) -> list[str]:
     윈도 집계는 여러 묶음에 적용되므로 FILTER가 있어도 그대로 둔다."""
     done = []
     for agg in list(tree.find_all(exp.Agg)):
+        if isinstance(agg.parent, exp.Filter) and agg.parent.this is agg:
+            raise EngineError(
+                "invalid_agg", "AGG(...)에 FILTER를 직접 붙일 수 없음",
+                hint="대상 행을 WHERE로 거른 뒤 AGG로 계산한다. 기간별 조건이 다르면 각 기간을 별도로 묶어 계산한 뒤 결과를 합친다",
+            )
         outer = agg.parent
         while outer is not None and not isinstance(outer, (exp.AggFunc, exp.Select)):
             outer = outer.parent
