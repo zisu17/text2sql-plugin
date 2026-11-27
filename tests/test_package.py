@@ -19,7 +19,7 @@ def test_upload_archive(tmp_path):
         names = zipped.namelist()
         assert names.count(".claude-plugin/plugin.json") == 1
         assert {
-            "scripts/t2s", "scripts/ask_a4.py", "t2s/cli.py", "t2s/measures.py",
+            "scripts/t2s", "t2s/cli.py", "t2s/measures.py",
             "skills/ask/SKILL.md", "skills/semantic-sync/SKILL.md",
             "skills/graph-metadata/SKILL.md", "skills/define-metric/SKILL.md",
             "references/definition-format.md", ".mcp.json", "hooks/check_definition.py",

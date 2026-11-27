@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "text2sql",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "자연어 SQL 조회와 Graph 메타데이터 탐색을 제공하는 플러그인",
   "extensions": {
     "com.openai": {
