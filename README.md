@@ -32,7 +32,7 @@ codex plugin add text2sql@text2sql-plugin
 Codex에서는 첫 사용 전에 일반 터미널에서 `t2s`를 설치합니다. 플러그인을 업데이트한 뒤에도 다시 실행합니다.
 
 ```bash
-sh ~/.codex/plugins/cache/text2sql-plugin/text2sql/0.7.0/scripts/t2s setup
+sh ~/.codex/plugins/cache/text2sql-plugin/text2sql/0.7.1/scripts/t2s setup
 ```
 
 설치 위치가 다르면 해당 플러그인 폴더의 `scripts/t2s` 경로를 사용합니다. 스킬은 `t2s`가 PATH에 없을 때 이 스크립트를 `sh`로 실행합니다.
@@ -81,6 +81,8 @@ Claude Code에서는 `/text2sql:ask 월별 매출 보여줘`, Codex에서는 `$a
 | `define-metric` | 지표를 정의하고 미리 계산한 뒤 사용자가 승인한 항목을 로컬 정의에 기록합니다 |
 | `semantic-sync` | 정의 파일과 실제 DB를 대조하고 누락 범위를 보고합니다 |
 | `graph-metadata` | 게시된 정의의 계보·영향도·조인을 Graph MCP에서 찾습니다 |
+
+직접 작성할 SQL을 독립적으로 비교하려면 질문에 “A4로 비교해 줘”를 덧붙입니다. Python 3와 로그인된 Codex CLI가 필요합니다. Luna에 질문과 관련 정의·스키마를 같은 입력으로 두 번 전달하고 실행 결과가 갈리면 세 번째 후보를 받습니다. `ask`가 질문과 지표 정의로 후보를 검토하고 업무 기준이 여전히 모호하면 사용자에게 묻습니다. 기본 조회와 등록 지표의 `compile` 경로는 기존과 같습니다.
 
 ## `t2s` 명령
 
@@ -148,6 +150,10 @@ uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.lock
 두 번째 명령(`build_plugin.py`)은 Claude 업로드용 `dist/text2sql.plugin`을 만듭니다. 빌드 스크립트는 개발용 파일과 링크를 제외합니다. Ossie 공식 적합성 사례는 외부 저장소와 DuckDB를 준비한 뒤 `OSSIE_DIR=/path/to/ossie uv run --with duckdb pytest tests/test_ossie_compliance.py`로 실행합니다.
 
 ## 변경 사항
+
+### 0.7.1
+
+- 직접 작성하는 SQL에 A4 후보 비교를 선택할 수 있습니다. 후보 생성은 Luna가 맡고 실행과 결과 비교는 로컬에서 진행합니다.
 
 ### 0.7.0 (깨지는 변경)
 

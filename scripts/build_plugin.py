@@ -13,6 +13,7 @@ FILES = [
     ROOT / "pyproject.toml",
     ROOT / "requirements.lock",
     ROOT / "scripts" / "t2s",
+    ROOT / "scripts" / "ask_a4.py",
     *sorted((ROOT / "agents").glob("*.md")),
     *sorted((ROOT / "hooks").glob("*.json")),
     *sorted((ROOT / "hooks").glob("*.py")),
