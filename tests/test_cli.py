@@ -6,7 +6,7 @@ import pytest
 import yaml
 from sqlalchemy.exc import OperationalError
 
-from tests.conftest import GOLDEN, MODEL, make_db, set_ext
+from tests.conftest import GOLDEN, MODEL, graph_server, make_db, set_ext
 from t2s import cli
 
 
@@ -16,9 +16,7 @@ def env(tmp_path, monkeypatch):
     con.executescript("CREATE TABLE payments_pii (card_no TEXT);")
     con.close()
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'demo.sqlite'}")
-    monkeypatch.setattr(cli, "fetch_model", lambda model=None: {
-        "version_id": "published-v1", "definition": yaml.safe_load(MODEL.read_text(encoding="utf-8"))
-    })
+    monkeypatch.setattr(cli, "fetch_definition", graph_server(yaml.safe_load(MODEL.read_text(encoding="utf-8"))))
     return monkeypatch
 
 
@@ -37,7 +35,7 @@ def test_draft_preview_and_local_definition_ignored(env, capsys):
     out = t2s(capsys, "compile", "avg_delivery_days", "--run")
     assert out["preview"] is True and out["result"]["rows"] == [[7.5]]
     assert [w["kind"] for w in out["warnings"]] == ["draft"] and "orders.avg_delivery_days" in out["warnings"][0]["message"]
-    assert {m["name"]: m["status"] for m in t2s(capsys, "compile")["metrics"]}["orders.avg_delivery_days"] == "draft"  # 목록에도 보인다
+    assert t2s(capsys, "compile", code=1)["error"]["kind"] == "invalid_query"  # 모델 전체 지표 목록은 내지 않는다
     out = t2s(capsys, "compile", "avg_delivery_days", "--allow-draft", "--run")
     assert out["preview"] is True and out["result"]["rows"] == [[7.5]] and any(w["kind"] == "preview" for w in out["warnings"])
     env.setenv("SEMANTIC_MODEL", "nope.yaml")
@@ -54,7 +52,7 @@ def test_draft_metric_retry_keeps_approved_joins(env, capsys):
     doc["relationships"].append({"name": "reviews_to_customers", "from": "order_reviews", "to": "customers",
                                  "from_columns": ["customer_id"], "to_columns": ["customer_id"],
                                  "nonportable_extensions": [{"vendor_name": "TEXT2SQL", "data": {"status": "draft"}}]})
-    env.setattr(cli, "fetch_model", lambda model=None: {"version_id": "published-v4", "definition": doc})
+    env.setattr(cli, "fetch_definition", graph_server(doc, "published-v4"))
     out = t2s(capsys, "compile", "order_reviews.review_rows", "--by", "customers.customer_state")
     assert "sql" in out and [w["kind"] for w in out["warnings"]] == ["draft"]
     assert "order_reviews.review_rows" in out["warnings"][0]["message"] and "승인 전 연결" not in out["warnings"][0]["message"]
@@ -88,10 +86,10 @@ def test_local_definition_preview(env, capsys, tmp_path):
     assert t2s(capsys, "context")["definition"]["version_id"] == "published-v1"
     assert t2s(capsys, "compile", "late_delivery_rate", code=1)["error"]["code"] == "unknown_metric"
 
-    def no_graph(model=None):
+    def no_graph(*args, **kwargs):
         raise AssertionError("로컬 정의 미리 계산에서 Graph를 호출했다")
 
-    env.setattr(cli, "fetch_model", no_graph)
+    env.setattr(cli, "fetch_definition", no_graph)
     option = ("--definition", str(path))
     source = {"kind": "local", "path": str(path)}
     context = t2s(capsys, "context", *option)
@@ -140,10 +138,9 @@ def test_setup_errors(env, capsys):
 
 def test_context_and_schema(env, capsys):
     out = t2s(capsys, "context")
-    # 정의 전체 요약은 기본 출력에 없다. LLM 이 받는 글자 수를 줄이려고 --datasets 범위만 낸다
-    assert out["dialect"] == "sqlite" and set(out) == {"dialect", "schema", "max_rows", "readonly_guarantee", "definition", "tables"}
+    # 정의 전체 요약도 전체 테이블 목록도 기본 출력에 없다. 정의가 커지면 LLM 입력에 넣을 수 없어서 --datasets 범위만 낸다
+    assert out["dialect"] == "sqlite" and set(out) == {"dialect", "schema", "max_rows", "readonly_guarantee", "definition"}
     assert t2s(capsys, "context", "예전 호출이 넘기던 질문 원문") == out
-    assert out["tables"] == ["customers", "order_items", "order_payments", "order_reviews", "orders", "product_category_name_translation", "products", "sellers"]
     schema = t2s(capsys, "schema")
     assert "orders" in schema["tables"] and "payments_pii" in schema["tables"]  # 정의 밖 테이블도 보인다
     assert schema["outside_definition"] == ["payments_pii"]
@@ -163,7 +160,7 @@ def test_context_datasets_scope(env, capsys, tmp_path):
     assert {line.split(" ")[1].split(".")[0] for line in fields.splitlines()[1:]} == {"orders", "customers"}
     assert joins.splitlines()[1:] == ["- orders → customers (customer_id = customer_id)"]  # 양 끝이 모두 범위 안
     assert [line.split(":")[0] for line in tables.splitlines()[1:-1]] == ["- orders", "- customers"]
-    assert out["tables"] == t2s(capsys, "context")["tables"]
+    assert out["tables"] == ["customers", "orders"]  # 고른 데이터셋의 테이블만
 
     only_customers = t2s(capsys, "context", "--datasets", "customers")["catalog"]
     assert "- revenue:" not in only_customers and "order_count" not in only_customers and "→" not in only_customers
@@ -172,7 +169,7 @@ def test_context_datasets_scope(env, capsys, tmp_path):
 
     for bad in ("orders,nope", ","):
         error = t2s(capsys, "context", "--datasets", bad, code=1)["error"]
-        assert error["kind"] == "unknown_table" and error["retryable"] is True and "orders" in error["message"]
+        assert error["kind"] == "unknown_table" and error["retryable"] is True and "graph_search_definitions" in error["message"]
 
     local = tmp_path / "local.ossie.yaml"
     local.write_text(MODEL.read_text(encoding="utf-8"), encoding="utf-8")
@@ -438,28 +435,49 @@ def test_local_context_and_compact_output(env, capsys):
     def no_graph(*args, **kwargs):
         raise AssertionError("Graph를 호출했다")
 
-    env.setattr(cli, "fetch_model", no_graph)
+    env.setattr(cli, "fetch_definition", no_graph)
     out = t2s(capsys, "context", "--local")
     assert out["dialect"] == "sqlite" and set(out) == {"dialect", "schema", "max_rows", "readonly_guarantee"}
     assert t2s(capsys, "context", "--local", "--datasets", "orders", code=1)["error"]["kind"] == "bad_args"
 
 
-def test_one_graph_snapshot_per_command(env, capsys):
-    """검증과 실행이 같은 활성 정의를 쓰고 명령당 Graph 왕복은 한 번만 한다."""
+def test_one_graph_call_per_command_with_its_own_scope(env, capsys):
+    """명령당 Graph 왕복은 한 번이고, 모델 전체가 아니라 명령이 쓰는 이름만 보낸다."""
     calls = []
-
-    def snapshot(model=None):
-        calls.append(model)
-        return {"version_id": "published-v1", "definition": yaml.safe_load(MODEL.read_text(encoding="utf-8"))}
-
-    env.setattr(cli, "fetch_model", snapshot)
+    env.setattr(cli, "fetch_definition", graph_server(yaml.safe_load(MODEL.read_text(encoding="utf-8")), calls=calls))
     commands = [
-        ("validate", "SELECT order_id FROM orders"),
-        ("run", "SELECT order_id FROM orders LIMIT 1"),
-        ("values", "orders.order_status"),
-        ("sql", "SELECT COUNT(*) FROM orders"),
-        ("compile", "order_count", "--run"),
+        (("validate", "SELECT order_id FROM orders"), {"tables": ["orders"]}, ["orders"]),
+        (("run", "SELECT o.order_id FROM orders o JOIN customers c ON c.customer_id = o.customer_id LIMIT 1"),
+         {"tables": ["customers", "orders"]}, ["customers", "orders"]),
+        (("values", "orders.order_status"), {"datasets": ["orders"], "tables": ["orders"]}, ["orders"]),
+        (("sql", "SELECT COUNT(*) FROM orders"), {"datasets": ["orders"], "tables": ["orders"]}, ["orders"]),
+        (("compile", "order_count", "--run"), {"metrics": ["order_count"]}, ["orders"]),
+        # 지표가 있는 데이터셋에서 묶음 기준 데이터셋까지 가는 길의 데이터셋만 받는다(리뷰·결제·판매자는 받지 않는다)
+        (("compile", "revenue", "--by", "customers.customer_state", "--run"),
+         {"datasets": ["customers"], "metrics": ["revenue"]}, ["customers", "order_items", "orders"]),
+        (("context", "--datasets", "order_items,customers"), {"datasets": ["customers", "order_items"]},
+         ["customers", "order_items", "orders"]),
     ]
-    for i, command in enumerate(commands, 1):
-        t2s(capsys, *command)
+    for i, (command, sent, returned) in enumerate(commands, 1):
+        out = t2s(capsys, *command)
+        assert "error" not in out, (command, out)
         assert len(calls) == i, command
+        call = calls[-1]
+        assert {k: v for k, v in call.items() if k != "returned" and v} == sent, command
+        assert call["returned"] == returned, command
+
+
+def test_context_and_schema_without_the_whole_definition(env, capsys):
+    """context 는 정의 이름·번호만, schema 는 DB 테이블 중 정의 밖 테이블만 알린다. 정의 전체를 받지 않는다."""
+    calls = []
+    env.setattr(cli, "fetch_definition", graph_server(yaml.safe_load(MODEL.read_text(encoding="utf-8")), calls=calls))
+    out = t2s(capsys, "context")
+    assert out["definition"]["version_id"] == "published-v1" and "tables" not in out and "catalog" not in out
+    assert out["definition"]["datasets_total"] == 8 and calls[-1]["returned"] is None
+    out = t2s(capsys, "schema")
+    assert out["outside_definition"] == ["payments_pii"] and calls[-1]["returned"] is None
+    assert "orders" in calls[-1]["tables"]
+    before = len(calls)
+    assert "describe" in t2s(capsys, "schema", "orders") and len(calls) == before  # 컬럼 설명은 DB 만 본다
+    error = t2s(capsys, "context", "--datasets", "nope", code=1)["error"]
+    assert error["kind"] == "unknown_table" and "graph_search_definitions" in error["message"]

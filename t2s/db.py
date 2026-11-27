@@ -144,9 +144,11 @@ class Database:
             "truncated": len(rows) > self.max_rows,
         }
 
-    def slow_parts(self, sql: str) -> list[dict]:
+    def slow_parts(self, sql: str, upper: bool = False) -> list[dict]:
         """실행하지 않고 실행 계획만 본다. 다른 표의 행마다 큰 표를 처음부터 다시 읽는 곳(반복 읽기 REPEATED_READS 이상)을 돌려준다.
         [{"table", "times": 다시 읽는 횟수, "rows": 한 번에 읽는 행 수}]. 계획을 읽지 못하면 빈 목록이다(실행을 막을 근거가 없다).
+        upper 면 행 수를 모르는 CTE·하위 쿼리를 그 안에서 읽는 가장 큰 표의 행 수로 잡는다(위로 어림). 실행 전 점검에는 쓰지 않는다
+        (묶음 결과를 크게 잡아 빠른 SQL 도 막는다). 이미 시간을 넘긴 SQL 에서 어디를 반복해 읽었는지 알려 줄 때 쓴다.
         ponytail: SQLite 만 본다. PostgreSQL 은 해시 조인을 쓰므로 상관 하위 쿼리만 남는다. 대상이 생기면 EXPLAIN (FORMAT JSON) 으로 붙인다"""
         if self.dialect != "sqlite":
             return []
@@ -161,7 +163,7 @@ class Database:
                         return None
 
                 tree = sqlglot.parse_one(sql, read="sqlite")
-                size = _sizes(tree, count)
+                size = _sizes(tree, count, upper)
         except (SQLAlchemyError, SqlglotError):
             return []
         real = {t.alias_or_name.lower(): t.name for t in tree.find_all(exp.Table)}  # 계획에는 별칭이 나온다
@@ -207,10 +209,11 @@ def _streams(tree: exp.Expression) -> bool:
             and not any(a.find_ancestor(exp.Select) is tree for a in tree.find_all(exp.AggFunc, exp.Window)))
 
 
-def _sizes(tree: exp.Expression, count):
+def _sizes(tree: exp.Expression, count, upper: bool = False):
     """실행 계획에 나오는 이름(표·별칭·CTE·하위 쿼리 별칭) → 행 수. 모르면 None 이다. 표는 count(표) 로 센다.
     CTE·하위 쿼리는 묶음 없는 집계면 1행, LIMIT 이 있으면 그 수 이하, 조건·조인·묶음 없이 한 표를 그대로 옮기면 그 표의 행 수다.
-    그 밖(조건·묶음·DISTINCT 가 있는 것)은 모른다. 묶음 결과는 몇 행일지 몰라 크게 잡으면 빠른 SQL 도 막는다(평가셋 bcds-001·hard-003)."""
+    그 밖(조건·묶음·DISTINCT 가 있는 것)은 모른다. 묶음 결과는 몇 행일지 몰라 크게 잡으면 빠른 SQL 도 막는다(평가셋 bcds-001·hard-003).
+    upper 면 모르는 것을 그 안에서 읽는 가장 큰 표(CTE 포함)의 행 수로 잡는다. 조건·묶음은 행을 늘리지 않으므로 위 어림이다."""
     ctes = {c.alias: c.this for c in tree.find_all(exp.CTE)}
     base = {}
     for t in tree.find_all(exp.Table):
@@ -230,6 +233,9 @@ def _sizes(tree: exp.Expression, count):
         cap = limit.expression if isinstance(limit, exp.Limit) else None
         if isinstance(cap, exp.Literal) and cap.is_int:
             return min(int(cap.name), n) if n is not None else int(cap.name)
+        if n is None and upper:
+            known = [m for t in q.find_all(exp.Table) if (m := table(t)) is not None]
+            n = max(known) if known else None
         return n
 
     def table(t: exp.Table) -> float | None:

@@ -29,7 +29,7 @@ Graph MCP가 연결돼 있으면 `graph_list_models`로 활성 모델을 확인�
 t2s context
 ```
 
-`dialect`(SQL 문법), `definition`(정의 이름·번호·`version_id`), `tables`(정의에 든 테이블)를 받는다. 정의에 없는 DB 테이블도 조회할 수 있으며 `t2s schema` 가 보여 준다. 정의 전체 요약은 오지 않는다. SQL 은 `dialect` 문법으로 쓴다. 다른 문법으로 쓰게 되면 `run`·`validate` 에 `--read <문법>` 을 붙이고, DB 별 문법 차이는 이 출력에 맡긴다.
+`dialect`(SQL 문법), `definition`(정의 이름·번호·`version_id`·데이터셋 수)을 받는다. 정의 전체 요약도 정의 전체 테이블 목록도 오지 않는다. 정의가 커져도 필요한 데이터셋만 보도록 Graph MCP 로 범위를 먼저 좁힌다. 정의에 없는 DB 테이블도 조회할 수 있으며 `t2s schema` 가 보여 준다. SQL 은 `dialect` 문법으로 쓴다. 다른 문법으로 쓰게 되면 `run`·`validate` 에 `--read <문법>` 을 붙이고, DB 별 문법 차이는 이 출력에 맡긴다.
 
 정의는 범위를 좁혀서 본다. 먼저 Graph MCP에서 질문에 필요한 데이터셋을 정한다. 출력·필터·조인에 필요한 각 필드의 소속을 `dataset.field`까지 확인한다. 이름이 비슷하거나 번역·보조 데이터셋에 있을 때는 `graph_search_definitions`의 `Field` 검색과 `graph_get_dataset`에서 확인한다. 데이터셋이 둘 이상이면 `graph_find_join_path(datasets=[...])`로 승인된 연결 경로를 찾고 `graph_list_join_rules(dataset)`에서 연결 키를 확인한다. DB에서 확인한 저장 코드와 누락 여부를 업무상의 의미나 상태 전환 규칙까지 확인한 것으로 해석하지 않는다.
 
@@ -39,7 +39,7 @@ t2s context
 t2s context --datasets <dataset,dataset>
 ```
 
-`catalog` 에 그 데이터셋을 읽는 승인 지표(설명·동의어·계산 지침), 그 데이터셋의 필드, 양 끝이 모두 범위 안인 연결, 표(기본키와 측정)가 온다. 없는 데이터셋 이름이면 `unknown_table` 이 오니 메시지의 목록을 보고 이름을 고친다. 질의에 데이터셋이 더 필요해지면 그 데이터셋을 더해 다시 부른다.
+`catalog` 에 그 데이터셋을 읽는 승인 지표(설명·동의어·계산 지침), 그 데이터셋의 필드, 양 끝이 모두 범위 안인 연결, 표(기본키와 측정)가 온다. `tables` 는 고른 데이터셋과 그 사이 연결 경로의 테이블이다. 없는 데이터셋 이름이면 `unknown_table` 이 오니 `graph_search_definitions(kinds=["Dataset"])` 로 이름을 찾아 고친다. 질의에 데이터셋이 더 필요해지면 그 데이터셋을 더해 다시 부른다.
 
 고정 규칙(정의와 상관없이 항상 같다):
 
@@ -139,7 +139,7 @@ SQL
 t2s compile <지표 ...> --by <dataset.field> --where "<dataset.field 조건>" --order=-<결과 컬럼> --limit <n> --run
 ```
 
-날짜 필드는 `__day`, `__week`, `__month`, `__quarter`, `__year` 를 붙여 묶는다. `--order` 는 결과 컬럼 이름(지표 이름, 또는 데이터셋 접두어를 뺀 묶음 이름 `created_at__month`)으로 쓴다. 기간은 `--where` 두 개로 반열림을 건다. 지표끼리 계산은 `--expr "metric_a / metric_b"` 로 하고 결과는 `value` 컬럼으로 나온다. 승인된 지표·연결만으로 안 되면 승인 전 것까지 넣어 계산하고 `warnings` 에 `draft` 를 붙인다. `fan_out_risk`, `no_join_path`, `no_anchor` 가 남으면 4a 로 SQL 을 직접 써서 다시 시도한다. 출력의 `extensions` 가 비어 있지 않으면 Ossie 3층 규격 밖 계산을 쓴 것이라 답의 "규격 밖 계산" 줄에 적는다. 지표 없이 부르면 지표 목록(승인 전 포함, `status` 표시)이 나온다.
+날짜 필드는 `__day`, `__week`, `__month`, `__quarter`, `__year` 를 붙여 묶는다. `--order` 는 결과 컬럼 이름(지표 이름, 또는 데이터셋 접두어를 뺀 묶음 이름 `created_at__month`)으로 쓴다. 기간은 `--where` 두 개로 반열림을 건다. 지표끼리 계산은 `--expr "metric_a / metric_b"` 로 하고 결과는 `value` 컬럼으로 나온다. 승인된 지표·연결만으로 안 되면 승인 전 것까지 넣어 계산하고 `warnings` 에 `draft` 를 붙인다. `fan_out_risk`, `no_join_path`, `no_anchor` 가 남으면 4a 로 SQL 을 직접 써서 다시 시도한다. 출력의 `extensions` 가 비어 있지 않으면 Ossie 3층 규격 밖 계산을 쓴 것이라 답의 "규격 밖 계산" 줄에 적는다. 지표 이름 없이 부르면 `invalid_query` 다. 모델 전체 지표 목록은 내지 않으니 지표는 `graph_search_definitions(kinds=["Metric"])` 로 찾는다.
 
 ## 5. 결과 점검
 

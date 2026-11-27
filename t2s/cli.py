@@ -1,6 +1,7 @@
 """플랫폼 공통 명령줄 진입점 `t2s`. Claude Code·Codex 스킬이 셸에서 불러 JSON 을 받는다. LLM 을 쓰지 않는다.
 
-DB 는 DATABASE_URL·DB_SCHEMA·SQL_DIALECT·MAX_ROWS·QUERY_TIMEOUT, 실행용 정의는 Graph MCP에서 받는다.
+DB 는 DATABASE_URL·DB_SCHEMA·SQL_DIALECT·MAX_ROWS·QUERY_TIMEOUT, 실행용 정의는 Graph 서버에서 받는다.
+정의는 모델 전체가 아니라 명령이 쓰는 데이터셋·테이블·지표와 그 사이 연결 경로만 받는다(정의가 커져도 받는 양은 질문 크기를 따른다).
 모든 출력은 stdout 에 JSON 하나다. T2S_LOG 에 파일 경로가 있으면 호출마다 사용 기록 JSON 한 줄을 덧붙인다.
 
 t2s context --datasets orders,order_items
@@ -25,7 +26,7 @@ from sqlglot import exp
 from sqlglot.errors import SqlglotError
 
 from . import engine
-from .graph_client import GraphClientError, fetch_model
+from .graph_client import GraphClientError, fetch_definition
 from .db import Database, type_family
 from .definition import findings, uncovered
 from .engine import BUILD, EngineError, SemanticModel, source_table
@@ -110,17 +111,69 @@ def _load(path: str) -> SemanticModel:
         _fail({"error": {"kind": "bad_definition", "message": f"정의 파일을 읽을 수 없음: {path} ({type(e).__name__}: {str(e)[:200]})"}})
 
 
-def _model() -> SemanticModel:
+_REF = re.compile(r"\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)")
+_NAMES_PER_CALL = 500  # Graph 서버가 한 요청에 받는 이름 수
+
+
+def _graph(**scope) -> dict:
+    """Graph 서버에서 이 명령에 필요한 정의 범위를 받는다. 질문을 시작할 때 본 버전(GRAPH_VERSION_ID)과 다르면 멈춘다."""
     try:
-        snapshot = fetch_model(os.getenv("GRAPH_MODEL") or None)
+        got = fetch_definition(os.getenv("GRAPH_MODEL") or None, **scope)
         expected_version = os.getenv("GRAPH_VERSION_ID")
-        if expected_version and snapshot["version_id"] != expected_version:
+        if expected_version and got["version_id"] != expected_version:
             raise GraphClientError("Graph MCP 활성 모델 버전이 질문 시작 후 바뀌었다. 지표를 다시 확인한다")
-        model = SemanticModel(snapshot["definition"])
-        model.graph_version_id = snapshot["version_id"]
-        return model
+        return got
     except (GraphClientError, KeyError, ValueError) as error:
         _fail({"error": {"kind": "graph_unavailable", "message": str(error)}})
+
+
+def _model(datasets=(), tables=(), metrics=()) -> SemanticModel:
+    """명령이 쓰는 데이터셋·실제 테이블·지표 이름이 닿는 정의만 담은 모델."""
+    got = _graph(datasets=list(datasets), tables=list(tables), metrics=list(metrics))
+    try:
+        model = SemanticModel(got["definition"])
+    except (KeyError, TypeError, ValueError) as error:
+        _fail({"error": {"kind": "graph_unavailable", "message": f"Graph 서버의 정의를 읽지 못했다({type(error).__name__})"}})
+    model.graph_version_id = got["version_id"]
+    return model
+
+
+def _defined_tables(names: list[str]) -> set[str]:
+    """DB 테이블 중 정의의 데이터셋이 읽는 테이블. 정의 전체 테이블 목록은 받지 않는다."""
+    out = set()
+    for i in range(0, len(names), _NAMES_PER_CALL):
+        out |= set(_graph(tables=names[i:i + _NAMES_PER_CALL], with_definition=False)["defined_tables"])
+    return out
+
+
+def _refs(texts) -> set[str]:
+    """dataset.field·dataset.metric 꼴 참조의 앞 이름. 데이터셋이 아닌 이름은 서버가 모른다고 돌려준다."""
+    return {m[0] for t in texts if isinstance(t, str) for m in _REF.findall(t)}
+
+
+def _sql_names(sql: str, read: str | None) -> list[str]:
+    """SQL 이 FROM·JOIN 에 쓴 이름(데이터셋이거나 실제 테이블). 읽지 못하면 빈 목록: 이어지는 검사가 문법 오류를 낸다."""
+    try:
+        return sorted({t.name for t in sqlglot.parse_one(sql, read=read).find_all(exp.Table) if t.name})
+    except SqlglotError:
+        return []
+
+
+def _compile_scope(a: argparse.Namespace) -> dict:
+    """compile 이 쓰는 지표 이름과 묶음·조건에 나온 데이터셋."""
+    metrics, texts = list(a.metrics), [*a.by, *a.where]
+    if a.query is not None:
+        try:
+            q = json.loads(a.query)
+        except ValueError:  # 엔진이 invalid_query 로 알린다
+            q = None
+        if isinstance(q, dict):
+            for part, key, into in (("metrics", "metric", metrics), ("dimensions", "field", texts)):
+                for x in q.get(part) if isinstance(q.get(part), list) else []:
+                    into.append(x.get(key) if isinstance(x, dict) else x)
+            texts.append(q.get("filter"))
+    metrics = [m for m in metrics if isinstance(m, str) and m]
+    return {"datasets": sorted(_refs(texts) | _refs(metrics)), "metrics": metrics}
 
 
 def _local_source(definition: str | None) -> dict:
@@ -233,6 +286,14 @@ def _slow(parts: list[dict]) -> dict:
                        "같다(=)가 아닌 조인 조건은 범위를 먼저 줄이거나 같다 비교로 바꿔 다시 실행한다. 이 모양이 꼭 필요하면 --force 로 실행한다"}
 
 
+def _loops(parts: list[dict]) -> str:
+    """시간을 넘긴 SQL 의 실행 계획에서 반복해 다시 읽은 곳. CTE·하위 쿼리의 행 수는 위로 어림한 값이다."""
+    where = "; ".join(f"{p['table']}(약 {_count(p['rows'])}행)를 다른 결과의 행마다 처음부터 다시 읽었다(약 {_count(p['times'])} 번)" for p in parts)
+    return (f"실행 계획(어림값): {where}. 두 결과를 잇는 같다(=) 조건이 없거나 DB 가 조인 순서를 잘못 골랐다. "
+            "기간·상태 조건으로 대상 행을 먼저 줄인 CTE 를 만들고, 그 CTE 에 다른 결과를 키로 하나씩 잇는다. "
+            "큰 CTE 둘을 바깥 표와 한꺼번에 잇지 않는다")
+
+
 def _execute(db: Database, safe: str, force: bool = False) -> dict:
     """가드를 통과한 SQL 을 실행한다. run·sql·compile --run 이 같이 쓴다. force 가 아니면 먼저 실행 계획을 보고 오래 걸릴 SQL 은 돌리지 않는다."""
     parts = [] if force else db.slow_parts(safe)
@@ -242,7 +303,14 @@ def _execute(db: Database, safe: str, force: bool = False) -> dict:
     try:
         result = db.execute(safe)
     except SQLAlchemyError as e:
-        return {"ok": False, "error": _db_error(e)}
+        error = _db_error(e)
+        if error["kind"] == "timeout" and (loops := db.slow_parts(safe, upper=True)):
+            error["parts"] = loops
+            error["message"] += ". " + _loops(loops)
+        if error["kind"] == "timeout" and db.dialect == "sqlite" and re.search(r"\bWITH\b", safe, re.I):
+            error["message"] += (". SQLite 는 원본 표 조인을 CTE 마다 되풀이하면 나쁜 조인 순서를 고르기 쉽다. 원본 표를 한 번 잇고 거른 CTE 하나를 "
+                                 "AS MATERIALIZED 로 만들고, 나머지 CTE 는 원본 표 대신 그 CTE 를 읽게 한다")
+        return {"ok": False, "error": error}
     return {"ok": True, "executed_sql": safe, **result, "elapsed_ms": round((time.monotonic() - start) * 1000, 1)}
 
 
@@ -261,7 +329,11 @@ def _compile(a: argparse.Namespace) -> None:
     if a.run:
         db = _database()
         a.dialect = db.dialect
-    model = _load(a.definition) if a.definition is not None else _model()
+    if a.definition is None and a.query is None and not (a.metrics or a.by):
+        _fail({"error": {"kind": "invalid_query", "retryable": True, "message": (
+            "지표 이름이나 --by 를 준다. 지표는 graph_search_definitions(kinds=[\"Metric\"]) 로 찾는다. "
+            "모델 전체 지표 목록은 내지 않는다")}})
+    model = _load(a.definition) if a.definition is not None else _model(**_compile_scope(a))
     times = {f"{d}.{n}".lower() for (d, n), f in model.fields.items() if is_time(f) and f.get("datatype") != "Date"}
     warnings = [w for cond in a.where for w in lint(cond, READ, time_columns=times)]
     if a.allow_draft:  # 승인 전에 결과를 보고 고치려는 미리 보기다. 질문 답변(ask)에서는 쓰지 않는다
@@ -331,7 +403,7 @@ def _values(db: Database, model: SemanticModel, ref: str, like: str | None, limi
 
     d, _, n = ref.partition(".")
     if d not in model.datasets and d.lower() not in db.tables:
-        fail("unknown_table", f"없는 데이터셋·테이블: {d} (데이터셋: {', '.join(model.datasets)})")
+        fail("unknown_table", f"없는 데이터셋·테이블: {d}. 데이터셋 이름은 graph_search_definitions(kinds=[\"Dataset\"]) 로 찾는다")
     warnings = []
     if (d, n) in model.fields:
         try:
@@ -410,28 +482,36 @@ def _check_definition(path: str | None, static: bool) -> None:
 
 
 def _context(db: Database, model: SemanticModel | None, definition: str | None,
-             datasets: str | None = None) -> dict:
-    """문법·스키마·정의 번호·정의에 든 테이블. 정의 요약(catalog)은 --datasets 로 고른 데이터셋 범위만 낸다.
+             datasets: str | None = None, meta: dict | None = None) -> dict:
+    """문법·스키마·정의 번호. 정의 요약(catalog)과 그 테이블은 --datasets 로 고른 데이터셋 범위만 낸다.
 
-    정의 전체 요약은 내지 않는다(Olist 기준 약 1만 6천 자). LLM 은 Graph MCP 로 범위를 좁힌 뒤 필요한 데이터셋만 받는다.
+    정의 전체 요약도, 정의 전체 테이블 목록도 내지 않는다. 정의가 커지면 LLM 입력에 넣을 수 없다.
+    LLM 은 Graph MCP 로 범위를 좁힌 뒤 필요한 데이터셋만 받는다. model 이 없으면 meta(서버 응답)의 이름·번호만 쓴다.
     """
     out = {
         "dialect": db.dialect, "schema": db.schema, "max_rows": db.max_rows, "readonly_guarantee": db.readonly_guarantee,
     }
-    if model is None:
+    if model is None and meta is None:
         return out
-    origin = {"source": "graph_mcp", "version_id": model.graph_version_id} if definition is None else {
-        "source": "local", "version_id": None, "path": definition,
-    }
-    out["definition"] = {"name": model.name, "revision": model.revision, **origin}
+    if definition is not None:
+        origin = {"source": "local", "version_id": None, "path": definition}
+    else:
+        origin = {"source": "graph_mcp", "version_id": model.graph_version_id if model else meta["version_id"]}
+    name, revision = (model.name, model.revision) if model else (meta.get("name"), meta.get("revision"))
+    out["definition"] = {"name": name, "revision": revision, **origin,
+                         **({"datasets_total": meta["datasets_total"]} if meta and "datasets_total" in meta else {})}
     if datasets is not None:
         only = {d.strip() for d in datasets.split(",") if d.strip()}
         unknown = sorted(only - set(model.datasets))
         if unknown or not only:
             _fail({"error": {"kind": "unknown_table", "retryable": True,
-                             "message": f"없는 데이터셋: {', '.join(unknown) or '(비어 있음)'} (데이터셋: {', '.join(model.datasets)})"}})
+                             "message": f"없는 데이터셋: {', '.join(unknown) or '(비어 있음)'}. "
+                                        "데이터셋 이름은 graph_search_definitions(kinds=[\"Dataset\"]) 로 찾는다"}})
         out["catalog"] = model.catalog(only)
-    return {**out, "tables": sorted(model.tables())}  # 정의의 테이블. 정의 밖 테이블은 t2s schema 가 보여 준다
+        out["tables"] = sorted(model.tables())  # 고른 데이터셋과 그 사이 연결 경로의 테이블. 정의 밖 테이블은 t2s schema 가 보여 준다
+    elif model is not None:  # 게시 전 로컬 정의 파일
+        out["tables"] = sorted(model.tables())
+    return out
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -528,22 +608,33 @@ def _main(argv: list[str]) -> None:
         return _emit(_context(_database(), None, None))
     definition = getattr(a, "definition", None)
     db = _database()
-    model = _load(definition) if definition is not None else _model()
+    local = _load(definition) if definition is not None else None
     if a.cmd == "context":
-        _emit(_context(db, model, definition, a.datasets))
-    elif a.cmd == "schema":
-        defined = table_names(model.tables())
-        out = {"describe": db.describe(a.tables)} if a.tables else {"tables": db.table_list(), "outside_definition": sorted(set(db.tables) - defined)}
-        _emit({**out, **_local_source(definition)})
-    elif a.cmd == "validate":
-        sql = _sql_arg(a.sql)
+        if local is not None:
+            return _emit(_context(db, local, definition, a.datasets))
+        if a.datasets is None:
+            return _emit(_context(db, None, None, meta=_graph(with_definition=False)))
+        return _emit(_context(db, _model(datasets=[d.strip() for d in a.datasets.split(",") if d.strip()]), None, a.datasets))
+    if a.cmd == "schema":
+        if a.tables:  # 컬럼 설명은 DB 에서만 읽는다
+            return _emit({"describe": db.describe(a.tables), **_local_source(definition)})
+        defined = table_names(local.tables()) if local is not None else _defined_tables(sorted(db.tables))
+        return _emit({"tables": db.table_list(), "outside_definition": sorted(set(db.tables) - defined), **_local_source(definition)})
+    if a.cmd == "values":
+        d = a.ref.partition(".")[0]
+        model = local or _model(datasets=[d], tables=[d])
+        return _values(db, model, a.ref, a.like, max(1, min(a.limit, 100)), definition=definition)
+    sql = _sql_arg(a.sql)  # validate·run·sql: SQL 이 FROM·JOIN 에 쓴 이름이 닿는 정의만 받는다
+    names = _sql_names(sql, a.read or db.dialect)
+    model = local or (_model(datasets=names, tables=names) if a.cmd == "sql" else _model(tables=names))
+    if a.cmd == "validate":
         safe, err = _check(db, sql, a.read, model=model)
         problems = [{"kind": err.kind, "message": str(err)}] if err else []
         slow = [{k: v for k, v in _slow(parts).items() if k != "retryable"}] if safe and (parts := db.slow_parts(safe)) else []
         _emit({"ok": err is None, "sql": safe, "problems": problems, **shape(sql, db.dialect, a.read),
                "warnings": _lint(db, model, sql, a.read) + slow})
     elif a.cmd == "run":
-        sql = _log["sql"] = _sql_arg(a.sql)
+        _log["sql"] = sql
         _log["executed"] = True  # 가드 거절도 실행 시도로 센다
         warnings = _lint(db, model, sql, a.read)
         safe, err = _check(db, sql, a.read, model=model)
@@ -551,16 +642,13 @@ def _main(argv: list[str]) -> None:
             return _emit_query({"ok": False, "error": _guard_error(err), "warnings": warnings}, a.compact)
         result = _execute(db, safe, a.force)
         _emit_query({**result, "warnings": warnings}, a.compact)
-    elif a.cmd == "values":
-        _values(db, model, a.ref, a.like, max(1, min(a.limit, 100)), definition=definition)
     elif a.cmd == "sql":
-        _sql(db, model, a)
+        _sql(db, model, a, sql)
 
 
-def _sql(db: Database, model: SemanticModel, a: argparse.Namespace) -> None:
+def _sql(db: Database, model: SemanticModel, a: argparse.Namespace, sql: str) -> None:
     """2층 SQL: 데이터셋을 표로, 지표를 AGG(별칭.지표)로 쓴 SQL 을 계산한다. 정의 안 된 집계도 계산하되 notes 에 적는다."""
     _log["executed"] = True
-    sql = _sql_arg(a.sql)
     read = a.read or db.dialect
     # 조인은 막지 않는다. 펼치기 전 데이터셋 이름으로 정의의 연결과 대조해 다르면 알린다
     warnings = _lint(db, model, sql, a.read, physical=False) + dataset_join_warnings(sql, read, model)

@@ -1,5 +1,6 @@
 """테스트 공통 재료. Olist 모양의 작은 SQLite 데이터와 정의 파일 경로. LLM 은 쓰지 않는다."""
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -13,10 +14,68 @@ GOLDEN = FIXTURE_DIR / "golden_olist.yaml"
 
 
 @pytest.fixture(autouse=True)
-def _cache_dir(tmp_path, monkeypatch):
-    """t2s 가 받은 정의 사본을 실제 홈이 아니라 테스트 폴더에 남기게 한다."""
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+def _graph_env(monkeypatch):
     monkeypatch.delenv("GRAPH_VERSION_ID", raising=False)
+
+
+def graph_server(doc: dict, version: str = "published-v1", calls: list | None = None):
+    """Graph 서버의 POST /definition 흉내. 요청한 이름이 닿는 데이터셋과 그 사이 연결 경로만 돌려준다
+    (text2sql-mcp 의 scope_datasets 와 같은 규칙). calls 에 요청과 돌려준 데이터셋 이름을 남긴다."""
+    def distances(start, step):
+        dist, frontier = {start: 0}, {start}
+        for hop in range(1, 5):
+            frontier = {n for f in frontier for n in step.get(f, ())} - dist.keys()
+            dist.update(dict.fromkeys(frontier, hop))
+        return dist
+
+    def fetch(model=None, *, datasets=(), tables=(), metrics=(), with_definition=True):
+        names = {d["name"].lower(): d["name"] for d in doc["datasets"]}
+        table_of = {d["name"]: d["source"].strip().lower().rpartition(".")[2] for d in doc["datasets"]
+                    if " " not in d["source"].strip()}
+        wanted_tables = {t.lower().rpartition(".")[2] for t in tables}
+        wanted = {names[n.lower()] for n in datasets if n.lower() in names}
+        wanted |= {d for d, t in table_of.items() if t in wanted_tables}
+        top = []
+        for m in metrics:
+            ds, dot, short = m.rpartition(".")
+            wanted |= {d["name"] for d in doc["datasets"] for x in d.get("metrics", [])
+                       if x["name"] == (short if dot else m) and (not dot or d["name"] == ds)}
+            for x in doc.get("metrics", []) if not dot else []:
+                if x["name"] == m:  # 모델 지표는 식에 쓴 데이터셋을 데려온다
+                    top.append(m)
+                    wanted |= {names[a.lower()] for a in re.findall(r"\b(\w+)\.\w+", x["expression"]["sql"]) if a.lower() in names}
+        reads = {w.lower() for w in wanted}  # 범위 데이터셋을 읽는 모델 지표는 정의만 함께 준다
+        top += [x["name"] for x in doc.get("metrics", []) if x["name"] not in top
+                and {a.lower() for a in re.findall(r"\b(\w+)\.\w+", x["expression"]["sql"])} & reads]
+        out_edges, into = {}, {}
+        for r in doc.get("relationships", []):
+            out_edges.setdefault(r["from"], set()).add(r["to"])
+            into.setdefault(r["to"], set()).add(r["from"])
+        keep = set(wanted)
+        if wanted:
+            back = {w: distances(w, into) for w in wanted}
+            reach_all = set.intersection(*(set(b) for b in back.values()))
+            for b in (wanted if reach_all & wanted else wanted | reach_all):
+                ahead = distances(b, out_edges)
+                for dist in back.values():
+                    keep |= {n for n, d in ahead.items() if n in dist and d + dist[n] <= 4}
+        read = {t.lower().rpartition(".")[2] for d in doc["datasets"] if d["name"] in keep and d["name"] not in table_of
+                for t in re.findall(r"\b(?:FROM|JOIN)\s+([\w.]+)", d["source"], re.I)}
+        keep |= {d for d, t in table_of.items() if t in read}  # 계산용 데이터셋이 읽는 표의 데이터셋
+        meta = {"tenant": "olist", "model": doc["name"], "version_id": version, "name": doc["name"],
+                "revision": SemanticModel(doc).revision,
+                "defined_tables": sorted(t for t in table_of.values() if t in wanted_tables),
+                "datasets_total": len(doc["datasets"])}
+        if calls is not None:
+            calls.append({"datasets": sorted(datasets), "tables": sorted(tables), "metrics": sorted(metrics),
+                          "returned": sorted(keep) if with_definition else None})
+        if not with_definition:
+            return meta
+        part = {**doc, "datasets": [d for d in doc["datasets"] if d["name"] in keep],
+                "metrics": [m for m in doc.get("metrics", []) if m["name"] in top],
+                "relationships": [r for r in doc.get("relationships", []) if r["from"] in keep and r["to"] in keep]}
+        return {**meta, "definition": part}
+    return fetch
 
 # o3 는 취소 주문이라 매출·주문 수에서 빠진다. c1 과 c3 은 같은 사람(u1)이다
 FIXTURE_SQL = """

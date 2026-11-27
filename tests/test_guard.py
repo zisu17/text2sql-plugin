@@ -147,3 +147,17 @@ def test_join_through_cte_or_subquery(model, sql, ok):
 def test_subquery_joins_follow_relationships(model, sql, ok):
     prepare(sql, "sqlite", max_rows=100, **policy(None, model))  # 막지 않는다
     assert (_join_warnings(model, sql) == []) is ok
+
+
+def test_sqlite_materializes_shared_ctes():
+    """SQLite 에서 두 번 이상 읽는 CTE 는 AS MATERIALIZED 로 실행한다(결과는 같다). 한 번 읽거나 쓴 사람이 정했으면 그대로 둔다."""
+    tables = {"orders", "customers"}
+    shared = ("WITH h AS (SELECT o.order_id, c.customer_unique_id AS uid FROM orders o JOIN customers c ON c.customer_id = o.customer_id), "
+              "f AS (SELECT uid, COUNT(*) AS n FROM h GROUP BY uid) SELECT h.order_id, f.n FROM h JOIN f ON f.uid = h.uid")
+    out = prepare(shared, "sqlite", tables, 10)
+    assert "h AS MATERIALIZED (" in out and "f AS (" in out
+    assert "MATERIALIZED" not in prepare(shared, "postgres", tables, 10)
+    kept = prepare(shared.replace("WITH h AS (", "WITH h AS NOT MATERIALIZED ("), "sqlite", tables, 10)
+    assert "h AS NOT MATERIALIZED (" in kept
+    once = "WITH h AS (SELECT order_id FROM orders) SELECT order_id FROM h"
+    assert "MATERIALIZED" not in prepare(once, "sqlite", tables, 10)

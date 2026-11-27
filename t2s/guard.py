@@ -376,7 +376,22 @@ def prepare(
                     identify=False, validate_qualify_columns=True)
         except OptimizeError as e:
             raise UnsafeSQL(f"없는 컬럼: {str(e)[:500]}", kind="unknown_column") from e
+    if dialect == "sqlite":
+        _materialize_shared(tree)
     return _cap_limit(tree, max_rows).sql(dialect=dialect)
+
+
+def _materialize_shared(tree: exp.Expression) -> None:
+    """SQLite 에서 두 번 이상 읽는 CTE 에 AS MATERIALIZED 를 붙인다. 결과는 같고 계산 방식만 바뀐다.
+    SQLite 는 이런 CTE 를 하위 쿼리로 펼쳐 다른 CTE 의 행마다 원본 표를 다시 읽는 계획을 고르기도 한다(평가셋 bcds-002 는 20초를 넘겼고
+    MATERIALIZED 를 붙이면 1초 안에 끝났다). 쓴 사람이 MATERIALIZED·NOT MATERIALIZED 를 정했거나 재귀 CTE 면 두지 않는다."""
+    for w in tree.find_all(exp.With):
+        if w.args.get("recursive"):
+            continue
+        for cte in w.expressions:
+            uses = sum(1 for t in tree.find_all(exp.Table) if not t.db and t.name == cte.alias)
+            if uses >= 2 and cte.args.get("materialized") is None:
+                cte.set("materialized", True)
 
 
 def _parse_single_query(sql: str, read: str) -> exp.Query:

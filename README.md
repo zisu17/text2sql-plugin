@@ -32,7 +32,7 @@ codex plugin add text2sql@text2sql-plugin
 Codex에서는 첫 사용 전에 일반 터미널에서 `t2s`를 설치합니다. 플러그인을 업데이트한 뒤에도 다시 실행합니다.
 
 ```bash
-sh ~/.codex/plugins/cache/text2sql-plugin/text2sql/0.6.1/scripts/t2s setup
+sh ~/.codex/plugins/cache/text2sql-plugin/text2sql/0.7.0/scripts/t2s setup
 ```
 
 설치 위치가 다르면 해당 플러그인 폴더의 `scripts/t2s` 경로를 사용합니다. 스킬은 `t2s`가 PATH에 없을 때 이 스크립트를 `sh`로 실행합니다.
@@ -58,7 +58,7 @@ uv pip install --python '/path/from/setup/bin/python' 'psycopg[binary]'
 
 ## Graph MCP 연결
 
-플러그인의 `mcp.json`은 [text2sql-graph-mcp](https://text2sql-graph-mcp-production.up.railway.app/mcp) 원격 서버의 연결 정보입니다. 서버 자체는 Railway에서 실행됩니다. 이 서버는 Neo4j에 게시된 활성 시맨틱 모델을 읽습니다. `t2s`는 같은 서버의 `GET /snapshot`에서 실행용 모델을 받아 메모리에서 컴파일합니다. 받은 모델은 접속 주소·인증 정보·버전별로 `~/.cache/t2s/snapshots/`(`XDG_CACHE_HOME`이 있으면 그 아래)에 남깁니다. `GRAPH_VERSION_ID`가 이미 받은 버전이면 인증된 조건부 요청으로 현재 스냅샷과 일치하는지 확인한 뒤 사본을 씁니다. 버전 번호는 정의 파일 내용으로 만들기 때문에 번호가 같으면 내용도 같습니다. 이 경로는 MCP 도구가 아니어서 LLM은 모델 전체를 불러올 수 없습니다. 원본 DB의 행은 MCP가 조회하지 않으므로 실제 값 실행에는 별도 `DATABASE_URL`이 필요합니다.
+플러그인의 `mcp.json`은 [text2sql-graph-mcp](https://text2sql-graph-mcp-production.up.railway.app/mcp) 원격 서버의 연결 정보입니다. 서버 자체는 Railway에서 실행됩니다. 이 서버는 Neo4j에 게시된 활성 시맨틱 모델을 읽습니다. `t2s`는 모델 전체를 받지 않습니다. 명령마다 그 명령이 쓰는 데이터셋·테이블·지표 이름을 같은 서버의 `POST /definition`에 보내고, 그 데이터셋과 그 사이 연결 경로만 담은 정의를 받아 메모리에서 컴파일·검사합니다. 정의가 커져도 받는 양은 질문이 닿는 범위만큼입니다. `GRAPH_VERSION_ID`를 주면 질문을 시작할 때 본 버전과 다를 때 멈춥니다. 이 경로는 MCP 도구가 아니어서 LLM이 부를 수 없습니다. 원본 DB의 행은 MCP가 조회하지 않으므로 실제 값 실행에는 별도 `DATABASE_URL`이 필요합니다.
 
 서버는 Railway 서비스의 `MCP_API_TOKEN`을 Bearer 토큰으로 요구합니다. 비밀번호나 토큰을 이 저장소와 대화에 넣지 마세요.
 
@@ -149,6 +149,15 @@ uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.lock
 
 ## 변경 사항
 
+### 0.7.0 (깨지는 변경)
+
+- `t2s`가 모델 전체(`GET /snapshot`) 대신 명령에 필요한 범위만 `POST /definition`에서 받습니다. text2sql-mcp 0.4.0 이상이 필요합니다. 배포는 MCP 서버를 먼저, 이 플러그인을 다음에 합니다. 받은 모델을 디스크에 남기던 사본(`~/.cache/t2s/snapshots/`)은 쓰지 않습니다.
+- `t2s context`는 `--datasets` 없이 부르면 정의 이름·번호·데이터셋 수만 냅니다. 정의 전체 테이블 목록(`tables`)은 `--datasets`로 고른 범위만 냅니다.
+- `t2s compile`을 지표 없이 부르면 모델 전체 지표 목록 대신 `invalid_query`로 Graph 검색을 안내합니다.
+- `t2s schema`의 `outside_definition`은 DB 테이블 이름을 서버에 보내 정의가 읽는 테이블인지 묻고 정합니다.
+- SQLite에서 두 번 이상 읽는 CTE는 `AS MATERIALIZED`로 실행합니다. 결과는 같고 계산 방식만 바뀝니다. SQLite가 이런 CTE를 펼쳐 다른 결과의 행마다 원본 표를 다시 읽는 계획을 고르기도 해서입니다(평가셋 bcds-002: 20초 넘음 → 1초 안).
+- 시간 초과 오류에 실행 계획에서 반복해 다시 읽은 곳(어림값)과 SQLite CTE 구조를 고치는 방법을 붙입니다.
+
 ### 0.6.1
 
 - 지표 검색과 정의 탐색은 후보 한 건으로 시작합니다. 첫 결과로 판단하기 어렵고 추가 후보가 있으면 검색 범위를 넓힙니다.
@@ -172,7 +181,7 @@ uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.lock
 | --- | --- |
 | [실패 유형](references/failure-types.md) | `diagnose`가 사용하는 실패 분류와 수정 방향 |
 | [스킬별 사용법](skills/ask/SKILL.md) | 자연어 조회부터 시작하는 스킬 지침. 다른 스킬은 [skills/](skills/)에서 찾습니다 |
-| [MCP 조회 계약](https://github.com/zisu17/text2sql-mcp/blob/main/docs/graphdb-mcp-design.md) | 정의 검색(BM25)·조인 경로·계보 조회 도구와 스냅샷 경로 |
+| [MCP 조회 계약](https://github.com/zisu17/text2sql-mcp/blob/main/docs/graphdb-mcp-design.md) | 정의 검색(BM25)·조인 경로·계보 조회 도구와 정의 범위 경로 |
 | [시맨틱 모델 작성 규칙](https://github.com/zisu17/semantic-definitions/blob/main/docs/semantic-model.md) | Ossie 정의의 정본·승인 상태·검증 |
 
 ## 라이선스
